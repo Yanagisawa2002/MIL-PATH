@@ -1,0 +1,8 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda.yaml
+
+project:
+  name: full_fast_cold_drug_pairfeat_cuda_b128
+
+training:
+  batch_size: 128
+  stage4_max_pairs: 0

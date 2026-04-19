@@ -1,0 +1,19 @@
+inherit_from: configs/experiments/full_fast_random.yaml
+
+project:
+  name: full_fast_random
+
+runtime:
+  device: cuda
+
+rgcn_pairwise:
+  hidden_dim: 128
+  num_layers: 2
+  num_bases: 8
+  dropout: 0.1
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 40
+  patience: 10
+  grad_clip_norm: 5.0
+  add_reverse_edges: true

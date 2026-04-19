@@ -1,0 +1,14 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128.yaml
+
+project:
+  name: full_fast_cold_drug_pairfeat_cuda_b128_sched
+
+training:
+  stage3_optimizer:
+    lr: 0.0005
+    weight_decay: 0.0005
+    scheduler:
+      enabled: true
+      type: cosine
+      warmup_epochs: 3
+      min_lr_ratio: 0.05

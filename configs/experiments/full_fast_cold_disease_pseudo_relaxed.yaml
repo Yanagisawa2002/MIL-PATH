@@ -1,0 +1,9 @@
+inherit_from: configs/experiments/full_fast_cold_disease.yaml
+
+pseudo:
+  pair_score_threshold: 0.55
+  top1_path_threshold: 0.5
+  top12_margin_threshold: 0.02
+  min_stability: 0.55
+  min_confidence: 0.15
+  require_schema_whitelist: true

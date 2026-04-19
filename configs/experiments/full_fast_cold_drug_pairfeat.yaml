@@ -1,0 +1,13 @@
+inherit_from: configs/experiments/full_fast_cold_drug.yaml
+
+project:
+  name: full_fast_cold_drug_pairfeat
+
+model:
+  direct_pair_features:
+    enabled: true
+    hidden_dim: 128
+
+training:
+  freeze_encoder_stage3: true
+  freeze_encoder_stage4: true

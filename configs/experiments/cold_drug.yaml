@@ -1,0 +1,8 @@
+inherit_from: configs/base.yaml
+
+project:
+  name: cold_drug
+
+data:
+  split:
+    strategy: cold-drug

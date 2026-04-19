@@ -1,0 +1,7 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat.yaml
+
+project:
+  name: full_fast_cold_drug_pairfeat_cuda
+
+runtime:
+  device: cuda

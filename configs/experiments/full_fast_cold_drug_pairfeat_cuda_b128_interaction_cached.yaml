@@ -1,0 +1,7 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction.yaml
+
+project:
+  name: full_fast_cold_drug_pairfeat_cuda_b128_interaction
+
+training:
+  stage3_bag_policy: cached_retrieve_all

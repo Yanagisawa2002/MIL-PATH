@@ -1,0 +1,33 @@
+inherit_from: configs/experiments/full_fast_cold_disease.yaml
+
+model:
+  direct_pair_features:
+    enabled: true
+    hidden_dim: 128
+  interaction:
+    enabled: true
+    hidden_dim: 128
+    dropout: 0.1
+
+training:
+  batch_size: 128
+  freeze_encoder_stage3: true
+  freeze_encoder_stage4: true
+  stage4_max_pairs: 0
+  stage3_bag_policy: cached_positive_only
+  stage2_num_negative_paths: 4
+  stage2_negative_mix:
+    corrupt_internal: 3
+    cross_pair_same_schema: 1
+    cross_pair_same_hop: 0
+  stage3_optimizer:
+    lr: 0.0005
+    weight_decay: 0.0005
+    scheduler:
+      enabled: true
+      type: cosine
+      warmup_epochs: 3
+      min_lr_ratio: 0.05
+
+runtime:
+  device: cuda

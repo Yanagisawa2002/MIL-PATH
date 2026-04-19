@@ -1,0 +1,38 @@
+inherit_from: configs/base.yaml
+
+project:
+  name: tiny_sanity
+
+data:
+  build:
+    edge_row_limit: 50000
+    mech_row_limit: 128
+    endpoint_aware_subgraph_sampling: true
+    cache_candidate_paths: true
+    candidate_cache_pairs_limit: 16
+  schema_prior:
+    top_k: 16
+    min_support: 1
+
+retriever:
+  max_hops: 3
+  max_candidates: 16
+  beam_width: 8
+  schema_top_k: 16
+
+model:
+  encoder:
+    hidden_dim: 64
+    num_heads: 2
+  path_scorer:
+    path_hidden_dim: 64
+
+training:
+  batch_size: 8
+  stage1_epochs: 1
+  stage2_epochs: 1
+  stage3_epochs: 1
+  stage4_epochs: 1
+
+pseudo:
+  enabled: false

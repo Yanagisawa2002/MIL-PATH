@@ -1,0 +1,224 @@
+project:
+  name: semi_mechanistic_drug_repurposing
+  seed: 42
+  output_root: outputs
+
+paths:
+  raw_kg_csv: "all_data(indication_only)/forSemi_KG.csv"
+  raw_mech_csv: "all_data(indication_only)/forSemi_Mech.csv"
+  raw_mech_json: "all_data(indication_only)/forSemi_Mech.json"
+  processed_dir: data/processed
+  split_dir: data/splits
+  cache_dir: data/cache
+
+data:
+  build:
+    edge_row_limit: null
+    mech_row_limit: null
+    remove_direct_drug_disease_edges_from_graph: true
+    endpoint_aware_subgraph_sampling: false
+    keep_only_types:
+      - drug
+      - disease
+      - gene/protein
+      - pathway
+      - biological_process
+      - molecular_function
+      - cellular_component
+      - effect/phenotype
+    cache_candidate_paths: false
+    candidate_cache_pairs_limit: 128
+  schema_prior:
+    top_k: 256
+    min_support: 2
+  split:
+    strategy: random
+    train_frac: 0.8
+    valid_frac: 0.1
+    test_frac: 0.1
+    stratify_by_label: true
+  negatives:
+    use_strong_negative_relations: true
+    strong_negative_relations:
+      - contraindication
+      - off-label use
+    degree_controlled_ratio: 1.0
+    target_negative_ratio: 1.0
+    shared_endpoint_hard_negative_ratio: 0.5
+    max_attempts_multiplier: 50
+
+retriever:
+  min_hops: 2
+  max_hops: 4
+  max_candidates: 64
+  beam_width: 16
+  schema_top_k: 64
+  template_top_k: 64
+  deduplicate: true
+  allow_schema_wildcard_edges: true
+  enable_type_only_schema_fallback: true
+  exact_min_candidates: 8
+  template_min_candidates: 8
+  enable_type_template_fallback: false
+  enable_bidirectional_bridge: false
+  bridge_min_candidates: 16
+  bridge_schema_limit: 32
+  bridge_per_meeting_node: 2
+  bridge_use_all_split_points: false
+  bridge_ignore_relation_constraints: true
+  enable_transition_bridge: false
+  transition_top_k_per_type: 6
+  transition_min_candidates: 16
+  transition_source_hops: 2
+  transition_target_hops: 2
+  transition_ignore_relation_constraints: true
+  enable_local_type_filter: false
+  local_type_probe_hops: 1
+  local_type_probe_node_budget: 256
+  stage3_cached:
+    cache_namespace: stage3_cached
+    min_hops: 2
+    max_hops: 6
+    max_candidates: 48
+    beam_width: 20
+    schema_top_k: 96
+    template_top_k: 96
+    exact_min_candidates: 4
+    template_min_candidates: 8
+    enable_type_only_schema_fallback: true
+    enable_type_template_fallback: true
+    enable_bidirectional_bridge: true
+    bridge_min_candidates: 12
+    bridge_schema_limit: 24
+    bridge_per_meeting_node: 2
+    bridge_use_all_split_points: false
+    bridge_ignore_relation_constraints: true
+    enable_transition_bridge: true
+    transition_top_k_per_type: 6
+    transition_min_candidates: 12
+    transition_source_hops: 2
+    transition_target_hops: 2
+    transition_ignore_relation_constraints: true
+    enable_local_type_filter: true
+    local_type_probe_hops: 1
+    local_type_probe_node_budget: 256
+  stage4:
+    cache_namespace: stage4
+    min_hops: 2
+    max_hops: 6
+    max_candidates: 64
+    beam_width: 20
+    schema_top_k: 96
+    template_top_k: 96
+    exact_min_candidates: 4
+    template_min_candidates: 8
+    enable_type_only_schema_fallback: true
+    enable_type_template_fallback: true
+    enable_bidirectional_bridge: true
+    bridge_min_candidates: 12
+    bridge_schema_limit: 24
+    bridge_per_meeting_node: 2
+    bridge_use_all_split_points: false
+    bridge_ignore_relation_constraints: true
+    enable_transition_bridge: true
+    transition_top_k_per_type: 6
+    transition_min_candidates: 12
+    transition_source_hops: 2
+    transition_target_hops: 2
+    transition_ignore_relation_constraints: true
+    enable_local_type_filter: true
+    local_type_probe_hops: 1
+    local_type_probe_node_budget: 256
+
+model:
+  encoder:
+    backbone: hgt
+    hidden_dim: 128
+    num_layers: 2
+    num_heads: 4
+    dropout: 0.1
+    relation_embedding_dim: 64
+  path_scorer:
+    path_hidden_dim: 128
+    path_layers: 1
+    relation_dim: 64
+    type_dim: 32
+    dropout: 0.1
+  direct_pair_features:
+    enabled: false
+    hidden_dim: 128
+  interaction:
+    enabled: true
+    hidden_dim: 128
+    dropout: 0.1
+  aggregator:
+    type: topk_logsumexp
+    top_k: 4
+    alpha: 0.5
+    attention_temperature: 1.0
+
+training:
+  batch_size: 32
+  num_workers: 0
+  lr: 0.001
+  weight_decay: 0.0001
+  grad_clip_norm: 5.0
+  stage1_epochs: 3
+  stage2_epochs: 5
+  stage3_epochs: 5
+  stage4_epochs: 3
+  stage4_anchor_weight: 0.25
+  stage4_pair_cls_weight: 1.0
+  freeze_encoder_stage3: false
+  freeze_encoder_stage4: false
+  stage3_optimizer:
+    lr: null
+    weight_decay: null
+    scheduler:
+      enabled: false
+      type: cosine
+      warmup_epochs: 0
+      min_lr_ratio: 0.1
+  loss_weights:
+    path_rank: 1.0
+    pair_cls: 1.0
+    consistency: 0.1
+    pseudo: 0.3
+  ranking_margin: 0.5
+  stage2_num_negative_paths: 8
+  stage2_ranking_reduction: topk_mean
+  stage2_ranking_top_k: 4
+  stage2_negative_mix:
+    corrupt_internal: 4
+    cross_pair_same_schema: 2
+    cross_pair_same_hop: 2
+  stage3_bag_policy: retrieve_all
+  stage4_max_pairs: null
+
+pseudo:
+  enabled: true
+  pair_score_threshold: 0.6
+  top1_path_threshold: 0.55
+  top12_margin_threshold: 0.03
+  min_stability: 0.55
+  min_confidence: 0.2
+  require_schema_whitelist: true
+  weight_scale: 1.0
+
+evaluation:
+  ks:
+    - 1
+    - 3
+    - 5
+    - 10
+  path_hard:
+    enabled: true
+    use_retrieved_candidates: true
+    use_cached_only: true
+    num_corruptions_per_gold: 4
+    num_cross_pair_same_schema: 4
+    num_cross_pair_same_hop: 4
+
+runtime:
+  device: cpu
+  amp: false

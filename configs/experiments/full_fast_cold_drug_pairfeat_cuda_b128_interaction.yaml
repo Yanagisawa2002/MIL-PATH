@@ -1,0 +1,10 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_sched.yaml
+
+project:
+  name: full_fast_cold_drug_pairfeat_cuda_b128_interaction
+
+model:
+  interaction:
+    enabled: true
+    hidden_dim: 128
+    dropout: 0.1

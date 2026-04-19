@@ -1,0 +1,12 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction.yaml
+
+project:
+  name: full_fast_cold_drug_pairfeat_cuda_b128_interaction
+
+training:
+  stage3_bag_policy: cached_positive_only
+  stage2_num_negative_paths: 4
+  stage2_negative_mix:
+    corrupt_internal: 3
+    cross_pair_same_schema: 1
+    cross_pair_same_hop: 0

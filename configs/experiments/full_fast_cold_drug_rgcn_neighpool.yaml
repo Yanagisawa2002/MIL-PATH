@@ -1,0 +1,5 @@
+inherit_from: configs/experiments/full_fast_cold_drug_rgcn_pairwise.yaml
+
+rgcn_pairwise:
+  use_pair_features: false
+  use_neighborhood_pooling: true

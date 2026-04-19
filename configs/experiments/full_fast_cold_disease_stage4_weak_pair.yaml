@@ -1,0 +1,7 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pseudo_relaxed.yaml
+
+training:
+  stage4_anchor_weight: 0.01
+  stage4_pair_cls_weight: 0.1
+  loss_weights:
+    pseudo: 3000.0

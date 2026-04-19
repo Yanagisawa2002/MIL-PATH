@@ -1,0 +1,5 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pseudo_relaxed_anchor_005.yaml
+
+training:
+  loss_weights:
+    pseudo: 3000.0

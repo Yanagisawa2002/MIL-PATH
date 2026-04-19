@@ -1,0 +1,11 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly.yaml
+
+project:
+  name: full_fast_cold_disease
+
+training:
+  stage2_num_negative_paths: 6
+  stage2_negative_mix:
+    corrupt_internal: 4
+    cross_pair_same_schema: 1
+    cross_pair_same_hop: 1

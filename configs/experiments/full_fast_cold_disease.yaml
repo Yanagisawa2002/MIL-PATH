@@ -1,0 +1,27 @@
+inherit_from: configs/base.yaml
+
+project:
+  name: full_fast_cold_disease
+
+data:
+  build:
+    edge_row_limit: null
+    mech_row_limit: null
+    cache_candidate_paths: false
+  split:
+    strategy: cold-disease
+  negatives:
+    target_negative_ratio: 1.0
+
+retriever:
+  max_candidates: 32
+  beam_width: 12
+
+training:
+  batch_size: 64
+  num_workers: 4
+  stage1_edge_samples: 200000
+  stage3_bag_policy: gold_only
+
+runtime:
+  device: cpu

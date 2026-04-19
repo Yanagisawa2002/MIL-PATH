@@ -1,0 +1,11 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly.yaml
+
+project:
+  name: full_fast_cold_drug_pairfeat_cuda_b128_interaction
+
+training:
+  stage2_num_negative_paths: 8
+  stage2_negative_mix:
+    corrupt_internal: 4
+    cross_pair_same_schema: 2
+    cross_pair_same_hop: 2
