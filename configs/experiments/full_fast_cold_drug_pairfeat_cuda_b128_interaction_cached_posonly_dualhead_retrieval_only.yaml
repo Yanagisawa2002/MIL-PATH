@@ -1,0 +1,8 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualhead.yaml
+
+model:
+  learned_retrieval:
+    enabled: true
+    hidden_dim: 128
+    dropout: 0.1
+    bias_scale: 0.5

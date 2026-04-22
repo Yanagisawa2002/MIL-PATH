@@ -1,0 +1,6 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_auxbin_head_s3calm.yaml
+
+training:
+  checkpointing:
+    save_best_model: true
+    best_model_filename: best_model.pt

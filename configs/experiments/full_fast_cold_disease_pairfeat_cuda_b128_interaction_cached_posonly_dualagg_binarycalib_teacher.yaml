@@ -1,0 +1,24 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualagg.yaml
+
+model:
+  binary_calibration:
+    enabled: true
+    pair_feedback_enabled: false
+    hidden_dim: 64
+    dropout: 0.1
+    delta_scale: 0.45
+    summary_dim: 3
+
+training:
+  stage3_binary_calibration_aux:
+    enabled: true
+    weight: 0.1
+    reduction: topk_mean
+    top_k: 4
+  stage3_binary_calibration_teacher:
+    enabled: true
+    weight: 0.1
+    top_k: 4
+    teacher_temperature: 1.0
+    student_temperature: 1.0
+    gold_boost: 0.75

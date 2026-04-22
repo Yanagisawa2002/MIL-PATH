@@ -1,0 +1,12 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_subpath_calib.yaml
+
+model:
+  dual_aggregation:
+    pair_feedback_enabled: false
+    use_explanation_in_reliability: false
+  binary_calibration:
+    enabled: false
+
+training:
+  stage3_binary_calibration_aux:
+    enabled: false

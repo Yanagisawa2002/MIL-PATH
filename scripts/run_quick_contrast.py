@@ -27,10 +27,19 @@ from src.models.pair_model import HierarchicalPairModel
 from src.models.path_scorer import PairConditionedPathScorer
 from src.training.engine import TrainingEngine
 from src.training.pipeline import build_candidate_store, build_stage_dataloaders, gather_node_states
-from src.training.pseudo_label import PseudoRationaleSelector
+from src.training.pseudo_label import PseudoPositivePairSelector, PseudoRationaleSelector
 from src.utils.config import load_experiment_config, prepare_experiment_config
 from src.utils.io import ensure_dir, save_json, write_csv
 from src.data.datasets import split_pair_id
+
+PATH_SOURCE_TO_ID = {
+    "gold": 0,
+    "retrieved": 1,
+    "corrupt_internal": 2,
+    "cross_pair_same_schema": 3,
+    "cross_pair_same_hop": 4,
+}
+SCHEMA_BUCKET_COUNT = 2048
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,10 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="configs/experiments/full_fast_random.yaml")
     parser.add_argument("--mode", choices=["direct_only", "neighbor_direct", "gold_mech"], required=True)
     parser.add_argument("--output-name", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--stage1-epochs", type=int, default=None)
     parser.add_argument("--stage2-epochs", type=int, default=None)
     parser.add_argument("--stage3-epochs", type=int, default=None)
     parser.add_argument("--stage4-epochs", type=int, default=None)
+    parser.add_argument("--stage5-epochs", type=int, default=None)
     parser.add_argument("--early-stop-patience", type=int, default=None)
     parser.add_argument("--rebuild", action="store_true")
     return parser.parse_args()
@@ -66,13 +77,93 @@ def _build_optimizer(
     lr: float,
     weight_decay: float,
     freeze_encoder: bool = False,
+    freeze_path_scorer: bool = False,
+    path_scorer_lr_multiplier: float = 1.0,
+    pair_model_lr_multiplier: float = 1.0,
+    freeze_explanation_branch: bool = False,
+    explanation_branch_lr_multiplier: float = 1.0,
 ) -> torch.optim.Optimizer:
-    params: list[torch.nn.Parameter] = []
+    path_explanation_prefixes = ("explanation_head.", "explanation_refiner.", "subpath_explanation.")
+    pair_explanation_prefixes = ("explanation_aggregator.", "hierarchical_explanation_aggregator.")
+
+    def _split_named_params(
+        module: torch.nn.Module,
+        *,
+        special_prefixes: tuple[str, ...],
+    ) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+        base_params: list[torch.nn.Parameter] = []
+        special_params: list[torch.nn.Parameter] = []
+        seen: set[int] = set()
+        for name, param in module.named_parameters():
+            if not param.requires_grad:
+                continue
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+            if any(name.startswith(prefix) for prefix in special_prefixes):
+                special_params.append(param)
+            else:
+                base_params.append(param)
+        return base_params, special_params
+
+    param_groups: list[dict[str, Any]] = []
     if not freeze_encoder:
-        params.extend(list(encoder.parameters()))
-    params.extend(list(path_scorer.parameters()))
-    params.extend(list(pair_model.parameters()))
-    return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
+        encoder_params = list(encoder.parameters())
+        if encoder_params:
+            param_groups.append(
+                {
+                    "params": encoder_params,
+                    "lr": lr,
+                    "weight_decay": weight_decay,
+                    "name": "encoder",
+                }
+            )
+    if not freeze_path_scorer:
+        scorer_params, scorer_explanation_params = _split_named_params(
+            path_scorer,
+            special_prefixes=path_explanation_prefixes,
+        )
+        if scorer_params:
+            param_groups.append(
+                {
+                    "params": scorer_params,
+                    "lr": lr * float(path_scorer_lr_multiplier),
+                    "weight_decay": weight_decay,
+                    "name": "path_scorer",
+                }
+            )
+        if not freeze_explanation_branch and scorer_explanation_params:
+            param_groups.append(
+                {
+                    "params": scorer_explanation_params,
+                    "lr": lr * float(path_scorer_lr_multiplier) * float(explanation_branch_lr_multiplier),
+                    "weight_decay": weight_decay,
+                    "name": "path_scorer_explanation",
+                }
+            )
+    pair_model_params, pair_model_explanation_params = _split_named_params(
+        pair_model,
+        special_prefixes=pair_explanation_prefixes,
+    )
+    if pair_model_params:
+        param_groups.append(
+            {
+                "params": pair_model_params,
+                "lr": lr * float(pair_model_lr_multiplier),
+                "weight_decay": weight_decay,
+                "name": "pair_model",
+            }
+        )
+    if not freeze_explanation_branch and pair_model_explanation_params:
+        param_groups.append(
+            {
+                "params": pair_model_explanation_params,
+                "lr": lr * float(pair_model_lr_multiplier) * float(explanation_branch_lr_multiplier),
+                "weight_decay": weight_decay,
+                "name": "pair_model_explanation",
+            }
+        )
+    return torch.optim.Adam(param_groups)
 
 
 def _build_stage3_scheduler(
@@ -118,6 +209,45 @@ def _zero_path_branch(pair_repr: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     path_reprs = torch.zeros(batch_size, 1, hidden_dim, device=pair_repr.device)
     bag_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=pair_repr.device)
     return path_scores, path_reprs, bag_mask
+
+
+def _build_path_quality_summary(
+    path_scores: torch.Tensor,
+    bag_mask: torch.Tensor,
+    explanation_logits: torch.Tensor | None = None,
+    binary_logits: torch.Tensor | None = None,
+    top_k: int = 4,
+) -> torch.Tensor:
+    score_logits = binary_logits
+    if score_logits is None:
+        score_logits = explanation_logits if explanation_logits is not None else path_scores
+    masked_logits = score_logits.masked_fill(~bag_mask, float("-inf"))
+    batch_size = masked_logits.size(0)
+    if masked_logits.size(1) == 0:
+        return torch.zeros(batch_size, 4, device=path_scores.device, dtype=path_scores.dtype)
+
+    k = min(int(top_k), masked_logits.size(1))
+    top_logits, _ = masked_logits.topk(k=k, dim=1)
+    top_probs = torch.sigmoid(top_logits)
+    empty_rows = ~bag_mask.any(dim=1)
+
+    top1_prob = top_probs[:, 0]
+    if k >= 2:
+        top12_margin = top_probs[:, 0] - top_probs[:, 1]
+    else:
+        top12_margin = torch.zeros_like(top1_prob)
+    topk_mean = top_probs.mean(dim=1)
+    if k >= 2:
+        topk_weights = torch.softmax(top_logits, dim=1)
+        entropy = -(topk_weights * torch.log(topk_weights.clamp(min=1e-8))).sum(dim=1)
+        entropy = entropy / math.log(float(k))
+    else:
+        entropy = torch.zeros_like(top1_prob)
+
+    summary = torch.stack([top1_prob, top12_margin, topk_mean, entropy], dim=-1)
+    if empty_rows.any():
+        summary = summary.masked_fill(empty_rows.unsqueeze(-1), 0.0)
+    return summary
 
 
 def _move_to_device(payload: Any, device: torch.device) -> Any:
@@ -193,6 +323,26 @@ def _endpoint_neighborhood_context(
     return total / denom
 
 
+def _schema_bucket_id(schema_id: str) -> int:
+    digest = hashlib.sha1(schema_id.encode("utf-8")).hexdigest()
+    return int(digest[:12], 16) % SCHEMA_BUCKET_COUNT + 1
+
+
+def _path_source_id(path_source: str) -> int:
+    return int(PATH_SOURCE_TO_ID.get(path_source, len(PATH_SOURCE_TO_ID)))
+
+
+def _build_path_metadata(bag: dict[str, Any], device: torch.device) -> dict[str, torch.Tensor]:
+    return {
+        "confidence": bag.get("confidence", torch.zeros_like(bag["path_mask"], dtype=torch.float)).to(device),
+        "is_retrieved": bag.get("is_retrieved", torch.zeros_like(bag["path_mask"], dtype=torch.bool)).to(device),
+        "is_gold": bag.get("is_gold", torch.zeros_like(bag["path_mask"], dtype=torch.bool)).to(device),
+        "schema_bucket_ids": bag.get("schema_bucket_ids", torch.zeros_like(bag["path_mask"], dtype=torch.long)).to(device),
+        "hop_counts": bag.get("hop_counts", torch.zeros_like(bag["path_mask"], dtype=torch.long)).to(device),
+        "path_source_ids": bag.get("path_source_ids", torch.zeros_like(bag["path_mask"], dtype=torch.long)).to(device),
+    }
+
+
 def _forward_pair_batch(
     batch: dict[str, Any],
     graph_data: dict[str, Any],
@@ -221,6 +371,7 @@ def _forward_pair_batch(
             path_reprs=path_reprs,
             pair_features=pair_features,
             bag_mask=bag_mask,
+            has_gold_rationale=batch.get("has_gold_rationale"),
         )
         return outputs, path_scores, bag_mask
 
@@ -234,6 +385,7 @@ def _forward_pair_batch(
             path_reprs=path_reprs,
             pair_features=pair_features,
             bag_mask=bag_mask,
+            has_gold_rationale=batch.get("has_gold_rationale"),
         )
         return outputs, path_scores, bag_mask
 
@@ -243,25 +395,58 @@ def _forward_pair_batch(
     flat_rel = bag["relation_ids"].reshape(-1, bag["relation_ids"].size(-1))
     flat_types = bag["node_type_ids"].reshape(-1, bag["node_type_ids"].size(-1))
     flat_seq_mask = bag["seq_mask"].reshape(-1, bag["seq_mask"].size(-1))
+    flat_schema_bucket_ids = bag["schema_bucket_ids"].reshape(-1)
+    flat_hop_counts = bag["hop_counts"].reshape(-1)
+    flat_path_source_ids = bag["path_source_ids"].reshape(-1)
     repeated_pair = pair_repr.unsqueeze(1).repeat(1, bag["node_indices"].size(1), 1).reshape(-1, pair_repr.size(-1))
-    flat_scores, flat_reprs = path_scorer(
+    return_aux = bool(
+        path_scorer.binary_head_enabled
+        or getattr(path_scorer, "decoupled_heads_enabled", False)
+        or getattr(pair_model.retrieval_reranker, "enabled", False)
+        or getattr(pair_model.reliability_estimator, "enabled", False)
+    )
+    scorer_outputs = path_scorer(
         pair_embedding=repeated_pair,
         node_states=flat_states,
         relation_ids=flat_rel,
         node_type_ids=flat_types,
         mask=flat_seq_mask,
+        schema_bucket_ids=flat_schema_bucket_ids,
+        hop_counts=flat_hop_counts,
+        path_source_ids=flat_path_source_ids,
+        return_aux=return_aux,
     )
+    if return_aux:
+        flat_scores, flat_reprs, flat_aux = scorer_outputs
+        flat_binary_logits = flat_aux.get("binary_logit")
+        flat_explanation_scores = flat_aux.get("explanation_score")
+    else:
+        flat_scores, flat_reprs = scorer_outputs
+        flat_binary_logits = None
+        flat_explanation_scores = None
     path_scores = flat_scores.reshape(bag["node_indices"].size(0), bag["node_indices"].size(1))
+    binary_scores = None
+    if flat_binary_logits is not None:
+        binary_scores = flat_binary_logits.reshape(bag["node_indices"].size(0), bag["node_indices"].size(1))
+    explanation_scores = None
+    if flat_explanation_scores is not None:
+        explanation_scores = flat_explanation_scores.reshape(bag["node_indices"].size(0), bag["node_indices"].size(1))
     path_reprs = flat_reprs.reshape(bag["node_indices"].size(0), bag["node_indices"].size(1), -1)
+    path_metadata = _build_path_metadata(bag, device=node_embeddings.device)
     outputs = pair_model(
         drug_embedding=drug_emb,
         disease_embedding=disease_emb,
         path_scores=path_scores,
         path_reprs=path_reprs,
+        explanation_scores=explanation_scores,
+        binary_scores=binary_scores,
+        path_metadata=path_metadata,
         pair_features=pair_features,
         bag_mask=bag["path_mask"],
+        has_gold_rationale=batch.get("has_gold_rationale"),
     )
-    return outputs, path_scores, bag["path_mask"]
+    eval_path_scores = explanation_scores if explanation_scores is not None else path_scores
+    return outputs, eval_path_scores, bag["path_mask"]
 
 
 def _train_stage1(
@@ -319,12 +504,19 @@ def _train_stage2(
             "relation_ids": positive["relation_ids"][:, 0],
             "node_type_ids": positive["node_type_ids"][:, 0],
             "mask": positive["seq_mask"][:, 0],
+            "schema_bucket_ids": positive["schema_bucket_ids"][:, 0],
+            "hop_counts": positive["hop_counts"][:, 0],
+            "path_source_ids": positive["path_source_ids"][:, 0],
         }
         neg_batch = {
             "node_states": gather_node_states(node_embeddings, negative["node_indices"]),
             "relation_ids": negative["relation_ids"],
             "node_type_ids": negative["node_type_ids"],
             "mask": negative["seq_mask"],
+            "schema_bucket_ids": negative["schema_bucket_ids"],
+            "hop_counts": negative["hop_counts"],
+            "path_source_ids": negative["path_source_ids"],
+            "path_sources": negative.get("path_sources", []),
         }
         losses = engine.stage2_loss(path_scorer, pair_repr, pos_batch, neg_batch)
         losses["total"].backward()
@@ -354,7 +546,10 @@ def _train_stage3(
     direct_only: bool,
     use_neighbor_context: bool = False,
     freeze_encoder: bool = False,
+    freeze_path_scorer: bool = False,
     cached_node_embeddings: torch.Tensor | None = None,
+    current_epoch: int | None = None,
+    total_epochs: int | None = None,
 ) -> list[dict[str, float]]:
     history: list[dict[str, float]] = []
     if cached_node_embeddings is not None:
@@ -367,7 +562,10 @@ def _train_stage3(
     else:
         encoder.train()
         frozen_node_embeddings = None
-    path_scorer.train()
+    if freeze_path_scorer:
+        path_scorer.eval()
+    else:
+        path_scorer.train()
     pair_model.train()
     total_steps = len(loaders["stage3"])
     for step, batch in enumerate(loaders["stage3"]):
@@ -383,7 +581,13 @@ def _train_stage3(
             direct_only=direct_only,
             use_neighbor_context=use_neighbor_context,
         )
-        losses = engine.stage3_loss(outputs, batch["labels"])
+        losses = engine.stage3_loss(
+            outputs,
+            batch["labels"],
+            path_bag=batch["path_bag"],
+            current_epoch=current_epoch,
+            total_epochs=total_epochs,
+        )
         losses["total"].backward()
         clip_grad_norm_(
             list(encoder.parameters()) + list(path_scorer.parameters()) + list(pair_model.parameters()),
@@ -491,7 +695,7 @@ def _train_stage4(
             pair_model=pair_model,
             direct_only=False,
         )
-        anchor_losses = engine.stage3_loss(anchor_outputs, anchor_batch["labels"])
+        anchor_losses = engine.stage3_loss(anchor_outputs, anchor_batch["labels"], path_bag=anchor_batch["path_bag"])
 
         total_loss = losses["total"] + anchor_weight * anchor_losses["total"]
         total_loss.backward()
@@ -515,6 +719,139 @@ def _train_stage4(
         if (step + 1) % 20 == 0 or step + 1 == total_steps:
             print(
                 {"heartbeat": "stage4", "step": step + 1, "total_steps": total_steps, "loss": history[-1]["total"]},
+                flush=True,
+            )
+    return history
+
+
+def _train_stage5(
+    loaders: dict[str, Any],
+    bundle: dict[str, Any],
+    encoder: HeteroGraphEncoder,
+    path_scorer: PairConditionedPathScorer,
+    pair_model: HierarchicalPairModel,
+    optimizer: torch.optim.Optimizer,
+    engine: TrainingEngine,
+    grad_clip_norm: float,
+    pair_pu_config: dict[str, Any],
+    anchor_weight: float,
+    freeze_encoder: bool = False,
+    freeze_path_scorer: bool = False,
+    cached_node_embeddings: torch.Tensor | None = None,
+) -> list[dict[str, float]]:
+    history: list[dict[str, float]] = []
+    if cached_node_embeddings is not None:
+        encoder.eval()
+        frozen_node_embeddings = cached_node_embeddings
+    elif freeze_encoder:
+        encoder.eval()
+        with torch.no_grad():
+            frozen_node_embeddings = encoder(bundle.graph_data).detach()
+    else:
+        encoder.train()
+        frozen_node_embeddings = None
+    if freeze_path_scorer:
+        path_scorer.eval()
+    else:
+        path_scorer.train()
+    pair_model.train()
+    selector = PseudoPositivePairSelector(config=pair_pu_config)
+    anchor_iter = iter(loaders["stage3"])
+
+    total_steps = len(loaders["stage5"])
+    for step, batch in enumerate(loaders["stage5"]):
+        batch = _move_to_device(batch, engine.device)
+        optimizer.zero_grad(set_to_none=True)
+        node_embeddings = frozen_node_embeddings if frozen_node_embeddings is not None else encoder(bundle.graph_data)
+        outputs, path_scores, bag_mask = _forward_pair_batch(
+            batch=batch,
+            graph_data=bundle.graph_data,
+            node_embeddings=node_embeddings,
+            path_scorer=path_scorer,
+            pair_model=pair_model,
+            direct_only=False,
+        )
+        explanation_scores = outputs.get("explanation_path_scores", path_scores)
+        binary_scores = outputs.get("binary_path_scores")
+        selection = selector.select(
+            pair_logits=outputs["pair_score"].detach(),
+            path_logits=explanation_scores.detach(),
+            binary_logits=None if binary_scores is None else binary_scores.detach(),
+            reliability=outputs.get("mechanistic_reliability", None).detach()
+            if outputs.get("mechanistic_reliability", None) is not None
+            else None,
+            uncertainty=outputs.get("mechanistic_uncertainty", None).detach()
+            if outputs.get("mechanistic_uncertainty", None) is not None
+            else None,
+            bag_mask=bag_mask,
+        )
+        pseudo_weights = selection.confidence.detach() * selection.accepted_mask.float().detach()
+        accepted_count = int(selection.accepted_mask.sum().item())
+        if accepted_count == 0:
+            history.append(
+                {
+                    "total": 0.0,
+                    "pseudo_pair": 0.0,
+                    "anchor_pair_cls": 0.0,
+                    "accepted_rate": float(selection.accepted_mask.float().mean().item()),
+                    "num_accepted": 0.0,
+                    "mean_confidence": float(selection.confidence.mean().item()),
+                    "mean_agreement": float(selection.agreement.mean().item()),
+                    "num_nonempty_bags": float(selection.summary["num_nonempty_bags"]),
+                }
+            )
+            if (step + 1) % 20 == 0 or step + 1 == total_steps:
+                print(
+                    {"heartbeat": "stage5", "step": step + 1, "total_steps": total_steps, "loss": history[-1]["total"]},
+                    flush=True,
+                )
+            continue
+
+        losses = engine.stage5_loss(
+            model_outputs=outputs,
+            pseudo_weights=pseudo_weights,
+        )
+
+        try:
+            anchor_batch = next(anchor_iter)
+        except StopIteration:
+            anchor_iter = iter(loaders["stage3"])
+            anchor_batch = next(anchor_iter)
+        anchor_batch = _move_to_device(anchor_batch, engine.device)
+        anchor_outputs, _, _ = _forward_pair_batch(
+            batch=anchor_batch,
+            graph_data=bundle.graph_data,
+            node_embeddings=node_embeddings,
+            path_scorer=path_scorer,
+            pair_model=pair_model,
+            direct_only=False,
+        )
+        anchor_losses = engine.stage3_loss(anchor_outputs, anchor_batch["labels"], path_bag=anchor_batch["path_bag"])
+
+        total_loss = losses["total"] + anchor_weight * anchor_losses["total"]
+        total_loss.backward()
+        clip_grad_norm_(
+            list(encoder.parameters()) + list(path_scorer.parameters()) + list(pair_model.parameters()),
+            grad_clip_norm,
+        )
+        optimizer.step()
+        history.append(
+            {
+                key: float((total_loss.detach().cpu().item() if key == "total" else value.detach().cpu().item()))
+                for key, value in losses.items()
+            }
+            | {
+                "anchor_pair_cls": float(anchor_losses["pair_cls"].detach().cpu().item()),
+                "accepted_rate": float(selection.accepted_mask.float().mean().item()),
+                "num_accepted": float(accepted_count),
+                "mean_confidence": float(selection.confidence.mean().item()),
+                "mean_agreement": float(selection.agreement.mean().item()),
+                "num_nonempty_bags": float(selection.summary["num_nonempty_bags"]),
+            }
+        )
+        if (step + 1) % 20 == 0 or step + 1 == total_steps:
+            print(
+                {"heartbeat": "stage5", "step": step + 1, "total_steps": total_steps, "loss": history[-1]["total"]},
                 flush=True,
             )
     return history
@@ -563,6 +900,19 @@ def _predict_pair_rows(
             for key in ("refined_direct_score", "refined_path_score", "fusion_gate", "interaction_delta"):
                 if key in outputs:
                     row[key] = float(outputs[key][idx].detach().cpu().item())
+            for key in ("mechanistic_reliability", "mechanistic_uncertainty", "mechanistic_gate"):
+                if key in outputs:
+                    row[key] = float(outputs[key][idx].detach().cpu().item())
+            reliability_raw = outputs.get("reliability_raw_features")
+            if reliability_raw is not None and reliability_raw.size(-1) >= 8:
+                row["reliability_top1"] = float(reliability_raw[idx, 0].detach().cpu().item())
+                row["reliability_margin"] = float(reliability_raw[idx, 1].detach().cpu().item())
+                row["reliability_topk_mean"] = float(reliability_raw[idx, 2].detach().cpu().item())
+                row["reliability_entropy"] = float(reliability_raw[idx, 3].detach().cpu().item())
+                row["reliability_agreement"] = float(reliability_raw[idx, 4].detach().cpu().item())
+                row["reliability_confidence"] = float(reliability_raw[idx, 5].detach().cpu().item())
+                row["reliability_retrieved_ratio"] = float(reliability_raw[idx, 6].detach().cpu().item())
+                row["reliability_bag_density"] = float(reliability_raw[idx, 7].detach().cpu().item())
             pair_rows.append(row)
     return pair_rows
 
@@ -622,6 +972,110 @@ def _score_valid_epoch(
     return evaluator.evaluate_pairs(pair_rows)
 
 
+def _compute_stage3_selection_score(
+    *,
+    pair_metrics: dict[str, float],
+    path_metrics: dict[str, float] | None,
+    selection_cfg: dict[str, Any],
+) -> tuple[float, dict[str, float]]:
+    pair_metric_name = str(selection_cfg.get("pair_metric", "auprc"))
+    pair_weight = float(selection_cfg.get("pair_weight", 1.0))
+    pair_value = float(pair_metrics.get(pair_metric_name, float("nan")))
+    score = pair_weight * pair_value if math.isfinite(pair_value) else float("-inf")
+    components: dict[str, float] = {
+        f"pair_{pair_metric_name}": pair_value,
+        "pair_weight": pair_weight,
+    }
+    for metric_name, metric_weight in dict(selection_cfg.get("path_weights", {})).items():
+        metric_value = float("nan") if path_metrics is None else float(path_metrics.get(metric_name, float("nan")))
+        components[f"path_{metric_name}"] = metric_value
+        components[f"path_weight_{metric_name}"] = float(metric_weight)
+        if math.isfinite(metric_value):
+            score += float(metric_weight) * metric_value
+    return score, components
+
+
+def _score_valid_epoch_with_selection(
+    *,
+    loaders: dict[str, Any],
+    bundle: dict[str, Any],
+    config: dict[str, Any],
+    encoder: HeteroGraphEncoder,
+    path_scorer: PairConditionedPathScorer,
+    pair_model: HierarchicalPairModel,
+    direct_only: bool,
+    use_neighbor_context: bool,
+    ks: list[int],
+    cached_node_embeddings: torch.Tensor | None = None,
+) -> dict[str, Any]:
+    pair_metrics = _score_valid_epoch(
+        loaders=loaders,
+        bundle=bundle,
+        encoder=encoder,
+        path_scorer=path_scorer,
+        pair_model=pair_model,
+        direct_only=direct_only,
+        use_neighbor_context=use_neighbor_context,
+        ks=ks,
+        cached_node_embeddings=cached_node_embeddings,
+    )
+    selection_cfg = dict(config["training"].get("stage3_model_selection", {}))
+    if not bool(selection_cfg.get("enabled", False)) or direct_only:
+        return {
+            "pair_metrics": pair_metrics,
+            "path_metrics": None,
+            "selection_score": float(pair_metrics.get(str(selection_cfg.get("pair_metric", "auprc")), pair_metrics["auprc"])),
+            "selection_components": {},
+        }
+
+    path_source = str(selection_cfg.get("path_metric_source", "hard_path"))
+    hard_cfg = deepcopy(config.get("evaluation", {}).get("path_hard", {}))
+    eval_output_dir = Path.cwd() / "outputs" / "_tmp_stage3_selection"
+    if path_source == "hard_path":
+        path_metrics, _, _, _ = _evaluate_path_and_explanations(
+            split_name="valid",
+            bundle=bundle,
+            config=config,
+            encoder=encoder,
+            path_scorer=path_scorer,
+            pair_model=pair_model,
+            direct_only=direct_only,
+            use_neighbor_context=use_neighbor_context,
+            output_dir=eval_output_dir,
+            ks=ks,
+            cached_node_embeddings=cached_node_embeddings,
+            benchmark_name="path_hard_select",
+            hard_cfg=hard_cfg,
+        )
+    else:
+        path_metrics, _, _, _ = _evaluate_path_and_explanations(
+            split_name="valid",
+            bundle=bundle,
+            config=config,
+            encoder=encoder,
+            path_scorer=path_scorer,
+            pair_model=pair_model,
+            direct_only=direct_only,
+            use_neighbor_context=use_neighbor_context,
+            output_dir=eval_output_dir,
+            ks=ks,
+            cached_node_embeddings=cached_node_embeddings,
+            benchmark_name="path_select",
+            hard_cfg={"enabled": False},
+        )
+    selection_score, selection_components = _compute_stage3_selection_score(
+        pair_metrics=pair_metrics,
+        path_metrics=path_metrics,
+        selection_cfg=selection_cfg,
+    )
+    return {
+        "pair_metrics": pair_metrics,
+        "path_metrics": path_metrics,
+        "selection_score": selection_score,
+        "selection_components": selection_components,
+    }
+
+
 def _evaluate_pair_strata(
     pair_rows: list[dict[str, Any]],
     ks: list[int],
@@ -676,6 +1130,246 @@ def _restore_model_state(
     pair_model.load_state_dict(snapshot["pair_model"])
 
 
+def _save_checkpoint(
+    output_dir: Path,
+    *,
+    filename: str,
+    encoder: HeteroGraphEncoder,
+    path_scorer: PairConditionedPathScorer,
+    pair_model: HierarchicalPairModel,
+    metadata: dict[str, Any] | None = None,
+) -> Path:
+    checkpoint_path = output_dir / filename
+    payload = {
+        "encoder": {key: value.detach().cpu().clone() for key, value in encoder.state_dict().items()},
+        "path_scorer": {key: value.detach().cpu().clone() for key, value in path_scorer.state_dict().items()},
+        "pair_model": {key: value.detach().cpu().clone() for key, value in pair_model.state_dict().items()},
+        "metadata": metadata or {},
+    }
+    torch.save(payload, checkpoint_path)
+    return checkpoint_path
+
+
+def _copy_prefixed_state(
+    source_state: dict[str, torch.Tensor],
+    target_state: dict[str, torch.Tensor],
+    *,
+    source_prefix: str,
+    target_prefix: str,
+) -> int:
+    copied = 0
+    for source_key, source_value in source_state.items():
+        if not source_key.startswith(source_prefix):
+            continue
+        suffix = source_key[len(source_prefix) :]
+        target_key = f"{target_prefix}{suffix}"
+        if target_key not in target_state:
+            continue
+        if tuple(target_state[target_key].shape) != tuple(source_value.shape):
+            continue
+        target_state[target_key] = source_value.clone()
+        copied += 1
+    return copied
+
+
+def _apply_initialization_from_checkpoint(
+    *,
+    config: dict[str, Any],
+    encoder: HeteroGraphEncoder,
+    path_scorer: PairConditionedPathScorer,
+    pair_model: HierarchicalPairModel,
+) -> dict[str, Any] | None:
+    init_cfg = dict(config["training"].get("initialization", {}))
+    if not bool(init_cfg.get("enabled", False)):
+        return None
+
+    checkpoint_path_value = init_cfg.get("checkpoint_path")
+    if not checkpoint_path_value:
+        raise ValueError("training.initialization.enabled=true but checkpoint_path is missing")
+    checkpoint_path = Path(str(checkpoint_path_value))
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = (REPO_ROOT / checkpoint_path).resolve()
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Initialization checkpoint not found: {checkpoint_path}")
+
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    explanation_payload = None
+    explanation_checkpoint_path = None
+    explanation_checkpoint_path_value = init_cfg.get("explanation_checkpoint_path")
+    if explanation_checkpoint_path_value:
+        explanation_checkpoint_path = Path(str(explanation_checkpoint_path_value))
+        if not explanation_checkpoint_path.is_absolute():
+            explanation_checkpoint_path = (REPO_ROOT / explanation_checkpoint_path).resolve()
+        if not explanation_checkpoint_path.exists():
+            raise FileNotFoundError(f"Explanation initialization checkpoint not found: {explanation_checkpoint_path}")
+        explanation_payload = torch.load(explanation_checkpoint_path, map_location="cpu", weights_only=False)
+    init_summary: dict[str, Any] = {
+        "checkpoint_path": str(checkpoint_path),
+        "encoder_keys": 0,
+        "path_keys": 0,
+        "pair_model_keys": 0,
+    }
+
+    if bool(init_cfg.get("copy_encoder", False)) and "encoder" in payload:
+        encoder_state = encoder.state_dict()
+        copied = 0
+        for key, value in payload["encoder"].items():
+            if key in encoder_state and tuple(encoder_state[key].shape) == tuple(value.shape):
+                encoder_state[key] = value.clone()
+                copied += 1
+        encoder.load_state_dict(encoder_state)
+        init_summary["encoder_keys"] = copied
+
+    scorer_state = path_scorer.state_dict()
+    source_scorer_state = payload.get("path_scorer", {})
+    copied_path_keys = 0
+    if bool(init_cfg.get("copy_full_path_scorer", False)):
+        for key, value in source_scorer_state.items():
+            if key in scorer_state and tuple(scorer_state[key].shape) == tuple(value.shape):
+                scorer_state[key] = value.clone()
+                copied_path_keys += 1
+    else:
+        if bool(init_cfg.get("copy_path_encoder", True)):
+            copied_path_keys += _copy_prefixed_state(
+                source_scorer_state,
+                scorer_state,
+                source_prefix="path_encoder.",
+                target_prefix="path_encoder.",
+            )
+        if bool(init_cfg.get("copy_evidence_head", True)):
+            copied_path_keys += _copy_prefixed_state(
+                source_scorer_state,
+                scorer_state,
+                source_prefix="evidence_head.",
+                target_prefix="evidence_head.",
+            )
+        if bool(init_cfg.get("copy_binary_head", True)):
+            copied_path_keys += _copy_prefixed_state(
+                source_scorer_state,
+                scorer_state,
+                source_prefix="binary_head.",
+                target_prefix="binary_head.",
+            )
+        if path_scorer.explanation_head is not None:
+            explanation_source = str(init_cfg.get("initialize_explanation_head_from", "evidence_head")).strip()
+            source_prefix = f"{explanation_source}."
+            copied_path_keys += _copy_prefixed_state(
+                source_scorer_state,
+                scorer_state,
+                source_prefix=source_prefix,
+                target_prefix="explanation_head.",
+            )
+            if explanation_payload is not None:
+                explanation_source_state = explanation_payload.get("path_scorer", {})
+                explanation_checkpoint_source = str(init_cfg.get("explanation_checkpoint_source", "explanation_head")).strip()
+                copied_path_keys += _copy_prefixed_state(
+                    explanation_source_state,
+                    scorer_state,
+                    source_prefix=f"{explanation_checkpoint_source}.",
+                    target_prefix="explanation_head.",
+                )
+    path_scorer.load_state_dict(scorer_state)
+    init_summary["path_keys"] = copied_path_keys
+
+    source_pair_state = payload.get("pair_model", {})
+    if source_pair_state:
+        pair_state = pair_model.state_dict()
+        copied_pair_keys = 0
+        if bool(init_cfg.get("copy_full_pair_model", False)):
+            for key, value in source_pair_state.items():
+                if key in pair_state and tuple(pair_state[key].shape) == tuple(value.shape):
+                    pair_state[key] = value.clone()
+                    copied_pair_keys += 1
+        else:
+            if bool(init_cfg.get("copy_direct_pair", False)):
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="direct_pair.",
+                    target_prefix="direct_pair.",
+                )
+            if bool(init_cfg.get("copy_interactor", False)):
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="interactor.",
+                    target_prefix="interactor.",
+                )
+            if bool(init_cfg.get("copy_retrieval_reranker", False)):
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="retrieval_reranker.",
+                    target_prefix="retrieval_reranker.",
+                )
+            if bool(init_cfg.get("copy_reliability_estimator", False)):
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="reliability_estimator.",
+                    target_prefix="reliability_estimator.",
+                )
+            if bool(init_cfg.get("copy_aggregator", False)):
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="aggregator.",
+                    target_prefix="aggregator.",
+                )
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="aggregator.",
+                    target_prefix="hierarchical_aggregator.within_group_aggregator.",
+                )
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="aggregator.",
+                    target_prefix="hierarchical_aggregator.between_group_aggregator.",
+                )
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="aggregator.",
+                    target_prefix="no_gold_evidence_expert.aggregator.",
+                )
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix="aggregator.",
+                    target_prefix="validity_aggregator.",
+                )
+            if bool(init_cfg.get("copy_explanation_aggregator", False)):
+                explanation_agg_source = str(
+                    init_cfg.get("initialize_explanation_aggregator_from", "aggregator")
+                ).strip()
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix=f"{explanation_agg_source}.",
+                    target_prefix="explanation_aggregator.",
+                )
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix=f"{explanation_agg_source}.",
+                    target_prefix="hierarchical_explanation_aggregator.within_group_aggregator.",
+                )
+                copied_pair_keys += _copy_prefixed_state(
+                    source_pair_state,
+                    pair_state,
+                    source_prefix=f"{explanation_agg_source}.",
+                    target_prefix="hierarchical_explanation_aggregator.between_group_aggregator.",
+                )
+        pair_model.load_state_dict(pair_state)
+        init_summary["pair_model_keys"] = copied_pair_keys
+    if explanation_checkpoint_path is not None:
+        init_summary["explanation_checkpoint_path"] = str(explanation_checkpoint_path)
+
+    return init_summary
+
+
 def _pad_path_group(path_group: list[dict[str, Any]], device: torch.device) -> dict[str, torch.Tensor]:
     max_seq = max(int(record["node_indices"].numel()) for record in path_group)
     num_paths = len(path_group)
@@ -683,6 +1377,12 @@ def _pad_path_group(path_group: list[dict[str, Any]], device: torch.device) -> d
     node_type_ids = torch.zeros(num_paths, max_seq, dtype=torch.long, device=device)
     relation_ids = torch.zeros(num_paths, max(max_seq - 1, 1), dtype=torch.long, device=device)
     seq_mask = torch.zeros(num_paths, max_seq, dtype=torch.bool, device=device)
+    confidence = torch.zeros(num_paths, dtype=torch.float, device=device)
+    is_retrieved = torch.zeros(num_paths, dtype=torch.bool, device=device)
+    is_gold = torch.zeros(num_paths, dtype=torch.bool, device=device)
+    schema_bucket_ids = torch.zeros(num_paths, dtype=torch.long, device=device)
+    hop_counts = torch.zeros(num_paths, dtype=torch.long, device=device)
+    path_source_ids = torch.zeros(num_paths, dtype=torch.long, device=device)
     for path_idx, record in enumerate(path_group):
         seq_len = int(record["node_indices"].numel())
         rel_len = int(record["relation_ids"].numel())
@@ -691,11 +1391,24 @@ def _pad_path_group(path_group: list[dict[str, Any]], device: torch.device) -> d
         if rel_len > 0:
             relation_ids[path_idx, :rel_len] = record["relation_ids"].to(device)
         seq_mask[path_idx, :seq_len] = True
+        confidence[path_idx] = float(record.get("confidence", 0.0))
+        path_source = str(record.get("path_source", "unknown"))
+        is_retrieved[path_idx] = path_source == "retrieved"
+        is_gold[path_idx] = path_source == "gold"
+        schema_bucket_ids[path_idx] = _schema_bucket_id(str(record.get("schema_id", "")))
+        hop_counts[path_idx] = int(record.get("hop_count", max(seq_len - 1, 0)))
+        path_source_ids[path_idx] = _path_source_id(path_source)
     return {
         "node_indices": node_indices,
         "node_type_ids": node_type_ids,
         "relation_ids": relation_ids,
         "seq_mask": seq_mask,
+        "confidence": confidence,
+        "is_retrieved": is_retrieved,
+        "is_gold": is_gold,
+        "schema_bucket_ids": schema_bucket_ids,
+        "hop_counts": hop_counts,
+        "path_source_ids": path_source_ids,
     }
 
 
@@ -1048,26 +1761,43 @@ def _evaluate_path_and_explanations(
         padded = _pad_path_group(path_group, device=node_embeddings.device)
         node_states = gather_node_states(node_embeddings, padded["node_indices"])
         repeated_pair = pair_repr.expand(len(path_group), -1)
-        path_scores, path_reprs = path_scorer(
+        scorer_outputs = path_scorer(
             pair_embedding=repeated_pair,
             node_states=node_states,
             relation_ids=padded["relation_ids"],
             node_type_ids=padded["node_type_ids"],
             mask=padded["seq_mask"],
+            return_aux=True,
         )
+        path_scores, path_reprs, path_aux = scorer_outputs
         path_scores = path_scores.reshape(1, -1)
         path_reprs = path_reprs.reshape(1, len(path_group), -1)
+        explanation_scores = path_aux.get("explanation_score")
+        if explanation_scores is not None:
+            explanation_scores = explanation_scores.reshape(1, -1)
+        binary_scores = path_aux.get("binary_logit")
+        if binary_scores is not None:
+            binary_scores = binary_scores.reshape(1, -1)
         bag_mask = torch.ones(1, len(path_group), dtype=torch.bool, device=node_embeddings.device)
+        path_metadata = {
+            "confidence": padded["confidence"].unsqueeze(0),
+            "is_retrieved": padded["is_retrieved"].unsqueeze(0),
+            "is_gold": padded["is_gold"].unsqueeze(0),
+        }
+        eval_scores = explanation_scores if explanation_scores is not None else path_scores
 
         outputs = pair_model(
             drug_embedding=drug_emb,
             disease_embedding=disease_emb,
             path_scores=path_scores,
             path_reprs=path_reprs,
+            explanation_scores=explanation_scores,
+            binary_scores=binary_scores,
+            path_metadata=path_metadata,
             pair_features=pair_features,
             bag_mask=bag_mask,
         )
-        top_idx = int(path_scores.squeeze(0).argmax().item())
+        top_idx = int(eval_scores.squeeze(0).argmax().item())
         top_ablated_mask = bag_mask.clone()
         top_ablated_mask[0, top_idx] = False
         top_ablated_outputs = pair_model(
@@ -1075,6 +1805,9 @@ def _evaluate_path_and_explanations(
             disease_embedding=disease_emb,
             path_scores=path_scores,
             path_reprs=path_reprs,
+            explanation_scores=explanation_scores,
+            binary_scores=binary_scores,
+            path_metadata=path_metadata,
             pair_features=pair_features,
             bag_mask=top_ablated_mask,
         )
@@ -1092,6 +1825,9 @@ def _evaluate_path_and_explanations(
                 disease_embedding=disease_emb,
                 path_scores=path_scores,
                 path_reprs=path_reprs,
+                explanation_scores=explanation_scores,
+                binary_scores=binary_scores,
+                path_metadata=path_metadata,
                 pair_features=pair_features,
                 bag_mask=random_ablated_mask,
             )
@@ -1104,7 +1840,12 @@ def _evaluate_path_and_explanations(
                     "pair_id": pair_id,
                     "path_id": record["path_id"],
                     "schema_id": record["schema_id"],
-                    "score": float(path_scores[0, path_idx].detach().cpu().item()),
+                    "score": float(eval_scores[0, path_idx].detach().cpu().item()),
+                    "evidence_score": float(path_scores[0, path_idx].detach().cpu().item()),
+                    "explanation_score": float(eval_scores[0, path_idx].detach().cpu().item()),
+                    "binary_score": float(binary_scores[0, path_idx].detach().cpu().item())
+                    if binary_scores is not None
+                    else float("nan"),
                     "is_gold": int(record.get("path_source") == "gold"),
                     "path_source": record.get("path_source", "unknown"),
                 }
@@ -1196,10 +1937,75 @@ def _summarize_stage4(
     }
 
 
+@torch.no_grad()
+def _summarize_stage5(
+    loaders: dict[str, Any],
+    bundle: dict[str, Any],
+    encoder: HeteroGraphEncoder,
+    path_scorer: PairConditionedPathScorer,
+    pair_model: HierarchicalPairModel,
+    pair_pu_config: dict[str, Any],
+    direct_only: bool,
+    use_neighbor_context: bool = False,
+    cached_node_embeddings: torch.Tensor | None = None,
+) -> dict[str, Any]:
+    encoder.eval()
+    path_scorer.eval()
+    pair_model.eval()
+    selector = PseudoPositivePairSelector(config=pair_pu_config)
+    node_embeddings = cached_node_embeddings if cached_node_embeddings is not None else encoder(bundle.graph_data)
+
+    total_pairs = 0
+    total_accepted = 0
+    total_nonempty = 0
+    confidence_sum = 0.0
+    agreement_sum = 0.0
+
+    for batch in loaders["stage5"]:
+        batch = _move_to_device(batch, node_embeddings.device)
+        outputs, path_scores, bag_mask = _forward_pair_batch(
+            batch=batch,
+            graph_data=bundle.graph_data,
+            node_embeddings=node_embeddings,
+            path_scorer=path_scorer,
+            pair_model=pair_model,
+            direct_only=direct_only,
+            use_neighbor_context=use_neighbor_context,
+        )
+        explanation_scores = outputs.get("explanation_path_scores", path_scores)
+        binary_scores = outputs.get("binary_path_scores")
+        selection = selector.select(
+            pair_logits=outputs["pair_score"],
+            path_logits=explanation_scores,
+            binary_logits=binary_scores,
+            reliability=outputs.get("mechanistic_reliability"),
+            uncertainty=outputs.get("mechanistic_uncertainty"),
+            bag_mask=bag_mask,
+        )
+        total_pairs += selection.summary["num_pairs"]
+        total_accepted += selection.summary["num_accepted"]
+        total_nonempty += selection.summary["num_nonempty_bags"]
+        confidence_sum += float(selection.confidence.sum().item())
+        agreement_sum += float(selection.agreement.sum().item())
+
+    mean_confidence = confidence_sum / max(1, total_pairs)
+    mean_agreement = agreement_sum / max(1, total_pairs)
+    return {
+        "num_pairs": total_pairs,
+        "num_accepted": total_accepted,
+        "accept_rate": float(total_accepted / max(1, total_pairs)),
+        "num_nonempty_bags": total_nonempty,
+        "mean_confidence": mean_confidence,
+        "mean_agreement": mean_agreement,
+    }
+
+
 def main() -> None:
     args = parse_args()
     print({"status": "starting", "config": args.config, "mode": args.mode}, flush=True)
     config = prepare_experiment_config(load_experiment_config(args.config), repo_root=REPO_ROOT)
+    if args.seed is not None:
+        config["project"]["seed"] = int(args.seed)
     _set_global_seed(int(config["project"].get("seed", 42)))
     if args.rebuild or not (Path(config["paths"]["processed_dir"]) / "graph_data.pt").exists():
         build_artifacts(config)
@@ -1239,6 +2045,14 @@ def main() -> None:
         config=model_config,
     ).to(device)
     print({"status": "models_ready"}, flush=True)
+    initialization_summary = _apply_initialization_from_checkpoint(
+        config=config,
+        encoder=encoder,
+        path_scorer=path_scorer,
+        pair_model=pair_model,
+    )
+    if initialization_summary is not None:
+        print({"status": "initialization_applied", **initialization_summary}, flush=True)
 
     optimizer = _build_optimizer(
         encoder=encoder,
@@ -1251,15 +2065,18 @@ def main() -> None:
     engine = TrainingEngine(config=config, device=device)
     grad_clip_norm = float(config["training"]["grad_clip_norm"])
 
-    training_history: dict[str, list[dict[str, float]]] = {"stage1": [], "stage2": [], "stage3": [], "stage4": []}
+    training_history: dict[str, list[dict[str, float]]] = {"stage1": [], "stage2": [], "stage3": [], "stage4": [], "stage5": []}
 
     stage1_epochs = args.stage1_epochs if args.stage1_epochs is not None else int(config["training"].get("stage1_epochs", 0))
     stage2_epochs = args.stage2_epochs if args.stage2_epochs is not None else int(config["training"].get("stage2_epochs", 0))
     stage3_epochs = args.stage3_epochs if args.stage3_epochs is not None else int(config["training"].get("stage3_epochs", 0))
     stage4_epochs = args.stage4_epochs if args.stage4_epochs is not None else int(config["training"].get("stage4_epochs", 0))
+    stage5_epochs = args.stage5_epochs if args.stage5_epochs is not None else int(config["training"].get("stage5_epochs", 0))
     stage4_anchor_weight = float(config["training"].get("stage4_anchor_weight", 0.25))
+    stage5_anchor_weight = float(config["training"].get("stage5_anchor_weight", 0.25))
     freeze_encoder_stage3 = bool(config["training"].get("freeze_encoder_stage3", False))
     freeze_encoder_stage4 = bool(config["training"].get("freeze_encoder_stage4", freeze_encoder_stage3))
+    freeze_encoder_stage5 = bool(config["training"].get("freeze_encoder_stage5", freeze_encoder_stage4))
     early_stop_patience = args.early_stop_patience
     trusted_schema_ids = _trusted_schema_ids(config, bundle)
     print({"status": "training_start", "stage1_epochs": stage1_epochs, "stage2_epochs": stage2_epochs, "stage3_epochs": stage3_epochs}, flush=True)
@@ -1278,6 +2095,17 @@ def main() -> None:
     stage3_optimizer_cfg = config["training"].get("stage3_optimizer", {})
     stage3_lr = float(stage3_optimizer_cfg.get("lr") or config["training"]["lr"])
     stage3_weight_decay = float(stage3_optimizer_cfg.get("weight_decay") or config["training"]["weight_decay"])
+    stage3_path_scorer_lr_multiplier = float(stage3_optimizer_cfg.get("path_scorer_lr_multiplier", 1.0))
+    stage3_pair_model_lr_multiplier = float(stage3_optimizer_cfg.get("pair_model_lr_multiplier", 1.0))
+    freeze_path_scorer_stage3 = bool(stage3_optimizer_cfg.get("freeze_path_scorer", False))
+    freeze_explanation_branch_stage3 = bool(stage3_optimizer_cfg.get("freeze_explanation_branch", False))
+    stage3_explanation_branch_lr_multiplier = float(stage3_optimizer_cfg.get("explanation_branch_lr_multiplier", 1.0))
+    explanation_schedule_cfg = dict(config["training"].get("stage3_explanation_schedule", {}))
+    explanation_schedule_enabled = bool(explanation_schedule_cfg.get("enabled", False))
+    explanation_unfreeze_epoch = int(explanation_schedule_cfg.get("unfreeze_epoch", 0))
+    explanation_post_unfreeze_lr_multiplier = float(
+        explanation_schedule_cfg.get("post_unfreeze_lr_multiplier", stage3_explanation_branch_lr_multiplier)
+    )
     optimizer = _build_optimizer(
         encoder=encoder,
         path_scorer=path_scorer,
@@ -1285,6 +2113,11 @@ def main() -> None:
         lr=stage3_lr,
         weight_decay=stage3_weight_decay,
         freeze_encoder=freeze_encoder_stage3,
+        freeze_path_scorer=freeze_path_scorer_stage3,
+        path_scorer_lr_multiplier=stage3_path_scorer_lr_multiplier,
+        pair_model_lr_multiplier=stage3_pair_model_lr_multiplier,
+        freeze_explanation_branch=freeze_explanation_branch_stage3,
+        explanation_branch_lr_multiplier=stage3_explanation_branch_lr_multiplier,
     )
     stage3_scheduler = _build_stage3_scheduler(optimizer, config=config, total_epochs=stage3_epochs)
 
@@ -1294,9 +2127,10 @@ def main() -> None:
         encoder.eval()
         with torch.no_grad():
             cached_stage34_embeddings = encoder(bundle.graph_data).detach()
-    best_valid_metrics = _score_valid_epoch(
+    best_valid_summary = _score_valid_epoch_with_selection(
         loaders=valid_loaders,
         bundle=valid_loaders["bundle"],
+        config=config,
         encoder=encoder,
         path_scorer=path_scorer,
         pair_model=pair_model,
@@ -1305,11 +2139,45 @@ def main() -> None:
         ks=config["evaluation"]["ks"],
         cached_node_embeddings=cached_stage34_embeddings,
     )
+    best_valid_metrics = best_valid_summary["pair_metrics"]
+    best_valid_path_metrics = best_valid_summary["path_metrics"]
+    best_valid_selection_score = float(best_valid_summary["selection_score"])
     best_snapshot = _snapshot_model_state(encoder, path_scorer, pair_model)
     best_stage3_epoch = 0
     no_improve_epochs = 0
 
     for epoch in range(stage3_epochs):
+        if (
+            explanation_schedule_enabled
+            and freeze_explanation_branch_stage3
+            and explanation_unfreeze_epoch > 0
+            and epoch + 1 == explanation_unfreeze_epoch
+        ):
+            freeze_explanation_branch_stage3 = False
+            stage3_explanation_branch_lr_multiplier = explanation_post_unfreeze_lr_multiplier
+            optimizer = _build_optimizer(
+                encoder=encoder,
+                path_scorer=path_scorer,
+                pair_model=pair_model,
+                lr=stage3_lr,
+                weight_decay=stage3_weight_decay,
+                freeze_encoder=freeze_encoder_stage3,
+                freeze_path_scorer=freeze_path_scorer_stage3,
+                path_scorer_lr_multiplier=stage3_path_scorer_lr_multiplier,
+                pair_model_lr_multiplier=stage3_pair_model_lr_multiplier,
+                freeze_explanation_branch=False,
+                explanation_branch_lr_multiplier=stage3_explanation_branch_lr_multiplier,
+            )
+            remaining_epochs = max(1, stage3_epochs - epoch)
+            stage3_scheduler = _build_stage3_scheduler(optimizer, config=config, total_epochs=remaining_epochs)
+            print(
+                {
+                    "status": "stage3_explanation_unfrozen",
+                    "epoch": epoch + 1,
+                    "explanation_branch_lr_multiplier": stage3_explanation_branch_lr_multiplier,
+                },
+                flush=True,
+            )
         history = _train_stage3(
             train_loaders,
             bundle,
@@ -1322,14 +2190,23 @@ def main() -> None:
             direct_only,
             use_neighbor_context=use_neighbor_context,
             freeze_encoder=freeze_encoder_stage3,
+            freeze_path_scorer=freeze_path_scorer_stage3,
             cached_node_embeddings=cached_stage34_embeddings,
+            current_epoch=epoch + 1,
+            total_epochs=stage3_epochs,
         )
         training_history["stage3"].append(engine.summarize_history(history))
-        current_lr = float(optimizer.param_groups[0]["lr"])
-        training_history["stage3"][-1]["lr"] = current_lr
-        current_valid_metrics = _score_valid_epoch(
+        group_lrs = {
+            (group.get("name") or f"group_{idx}"): float(group["lr"])
+            for idx, group in enumerate(optimizer.param_groups)
+        }
+        training_history["stage3"][-1]["lr"] = float(next(iter(group_lrs.values())))
+        for group_name, group_lr in group_lrs.items():
+            training_history["stage3"][-1][f"lr_{group_name}"] = group_lr
+        current_valid_summary = _score_valid_epoch_with_selection(
             loaders=valid_loaders,
             bundle=valid_loaders["bundle"],
+            config=config,
             encoder=encoder,
             path_scorer=path_scorer,
             pair_model=pair_model,
@@ -1338,21 +2215,32 @@ def main() -> None:
             ks=config["evaluation"]["ks"],
             cached_node_embeddings=cached_stage34_embeddings,
         )
-        if current_valid_metrics["auprc"] > best_valid_metrics["auprc"]:
+        current_valid_metrics = current_valid_summary["pair_metrics"]
+        current_valid_path_metrics = current_valid_summary["path_metrics"]
+        current_selection_score = float(current_valid_summary["selection_score"])
+        if current_selection_score > best_valid_selection_score:
             best_valid_metrics = current_valid_metrics
+            best_valid_path_metrics = current_valid_path_metrics
+            best_valid_selection_score = current_selection_score
             best_snapshot = _snapshot_model_state(encoder, path_scorer, pair_model)
             best_stage3_epoch = epoch + 1
             no_improve_epochs = 0
         else:
             no_improve_epochs += 1
+        training_history["stage3"][-1]["valid_auprc"] = float(current_valid_metrics["auprc"])
+        training_history["stage3"][-1]["selection_score"] = current_selection_score
+        if current_valid_path_metrics is not None:
+            for metric_name in ("mrr", "hits@1", "hits@5"):
+                if metric_name in current_valid_path_metrics:
+                    training_history["stage3"][-1][f"valid_path_{metric_name}"] = float(current_valid_path_metrics[metric_name])
         print(
             {
                 "mode": args.mode,
                 "stage": "stage3",
                 "epoch": epoch + 1,
                 **training_history["stage3"][-1],
-                "valid_auprc": current_valid_metrics["auprc"],
                 "best_valid_auprc": best_valid_metrics["auprc"],
+                "best_selection_score": best_valid_selection_score,
             }
         )
         if stage3_scheduler is not None:
@@ -1361,6 +2249,25 @@ def main() -> None:
             break
 
     _restore_model_state(encoder, path_scorer, pair_model, best_snapshot)
+    checkpoint_cfg = dict(config["training"].get("checkpointing", {}))
+    best_checkpoint_path = None
+    if bool(checkpoint_cfg.get("save_best_model", False)):
+        best_checkpoint_path = _save_checkpoint(
+            output_dir,
+            filename=str(checkpoint_cfg.get("best_model_filename", "best_model.pt")),
+            encoder=encoder,
+            path_scorer=path_scorer,
+            pair_model=pair_model,
+            metadata={
+                "mode": args.mode,
+                "config": args.config,
+                "seed": int(config["project"].get("seed", 42)),
+                "best_valid_stage3_epoch": best_stage3_epoch,
+                "best_valid_metrics": best_valid_metrics,
+                "best_valid_path_metrics": best_valid_path_metrics,
+                "best_valid_selection_score": best_valid_selection_score,
+            },
+        )
 
     if not direct_only and stage4_epochs > 0:
         for epoch in range(stage4_epochs):
@@ -1381,6 +2288,44 @@ def main() -> None:
             )
             training_history["stage4"].append(engine.summarize_history(history))
             print({"mode": args.mode, "stage": "stage4", "epoch": epoch + 1, **training_history["stage4"][-1]})
+
+    pair_pu_cfg = dict(config.get("pair_pu", {}))
+    if not direct_only and bool(pair_pu_cfg.get("enabled", False)) and stage5_epochs > 0:
+        stage5_optimizer_cfg = config["training"].get("stage5_optimizer", {})
+        stage5_lr = float(stage5_optimizer_cfg.get("lr") or stage3_lr)
+        stage5_weight_decay = float(stage5_optimizer_cfg.get("weight_decay") or stage3_weight_decay)
+        stage5_path_scorer_lr_multiplier = float(stage5_optimizer_cfg.get("path_scorer_lr_multiplier", 0.1))
+        stage5_pair_model_lr_multiplier = float(stage5_optimizer_cfg.get("pair_model_lr_multiplier", 1.0))
+        freeze_path_scorer_stage5 = bool(stage5_optimizer_cfg.get("freeze_path_scorer", False))
+        optimizer = _build_optimizer(
+            encoder=encoder,
+            path_scorer=path_scorer,
+            pair_model=pair_model,
+            lr=stage5_lr,
+            weight_decay=stage5_weight_decay,
+            freeze_encoder=freeze_encoder_stage5,
+            freeze_path_scorer=freeze_path_scorer_stage5,
+            path_scorer_lr_multiplier=stage5_path_scorer_lr_multiplier,
+            pair_model_lr_multiplier=stage5_pair_model_lr_multiplier,
+        )
+        for epoch in range(stage5_epochs):
+            history = _train_stage5(
+                train_loaders,
+                bundle,
+                encoder,
+                path_scorer,
+                pair_model,
+                optimizer,
+                engine,
+                grad_clip_norm,
+                pair_pu_config=pair_pu_cfg,
+                anchor_weight=stage5_anchor_weight,
+                freeze_encoder=freeze_encoder_stage5,
+                freeze_path_scorer=freeze_path_scorer_stage5,
+                cached_node_embeddings=cached_stage34_embeddings if freeze_encoder_stage5 else None,
+            )
+            training_history["stage5"].append(engine.summarize_history(history))
+            print({"mode": args.mode, "stage": "stage5", "epoch": epoch + 1, **training_history["stage5"][-1]})
 
     valid_metrics, valid_pair_rows = _evaluate_pairs(
         valid_loaders,
@@ -1483,11 +2428,34 @@ def main() -> None:
         use_neighbor_context=use_neighbor_context,
         cached_node_embeddings=cached_stage34_embeddings,
     )
+    if bool(pair_pu_cfg.get("enabled", False)):
+        stage5_summary = _summarize_stage5(
+            train_loaders,
+            bundle,
+            encoder,
+            path_scorer,
+            pair_model,
+            pair_pu_config=pair_pu_cfg,
+            direct_only=direct_only,
+            use_neighbor_context=use_neighbor_context,
+            cached_node_embeddings=cached_stage34_embeddings,
+        )
+    else:
+        stage5_summary = {
+            "num_pairs": 0,
+            "num_accepted": 0,
+            "accept_rate": 0.0,
+            "num_nonempty_bags": 0,
+            "mean_confidence": 0.0,
+            "mean_agreement": 0.0,
+        }
 
     summary = {
         "mode": args.mode,
         "best_valid_stage3_epoch": best_stage3_epoch,
         "best_valid_metrics": best_valid_metrics,
+        "best_valid_path_metrics": best_valid_path_metrics,
+        "best_valid_selection_score": best_valid_selection_score,
         "valid": valid_metrics,
         "test": test_metrics,
         "valid_pair_strata": valid_pair_strata,
@@ -1505,7 +2473,10 @@ def main() -> None:
         "valid_path_hard_diagnostics": valid_path_hard_diag,
         "test_path_hard_diagnostics": test_path_hard_diag,
         "stage4": stage4_summary,
+        "stage5": stage5_summary,
         "training_history": training_history,
+        "initialization": initialization_summary,
+        "best_checkpoint_path": None if best_checkpoint_path is None else str(best_checkpoint_path),
     }
     save_json(summary, output_dir / "contrast_summary.json")
     print(json.dumps(summary, indent=2))

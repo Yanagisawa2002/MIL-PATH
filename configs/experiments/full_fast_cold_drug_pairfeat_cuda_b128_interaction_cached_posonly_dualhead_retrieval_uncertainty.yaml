@@ -1,0 +1,8 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_only.yaml
+
+model:
+  interaction:
+    path_quality_summary:
+      enabled: true
+      feature_dim: 4
+      top_k: 4

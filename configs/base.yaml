@@ -144,18 +144,278 @@ model:
     relation_dim: 64
     type_dim: 32
     dropout: 0.1
+    multi_view_encoder:
+      enabled: false
+      hidden_dim: 128
+    subpath_explanation:
+      enabled: false
+      hidden_dim: 128
+      temperature: 1.0
+    prototype_aware_explanation:
+      enabled: false
+      mode: direct_update
+      num_prototypes: 12
+      hidden_dim: 128
+      metadata_dim: 32
+      temperature: 1.0
+      memory_top_k: 4
+      residual_scale: 0.2
+      schema_bucket_count: 2048
+      max_hops: 8
+      path_source_vocab_size: 8
+    decoupled_heads:
+      enabled: false
+      hidden_dim: 128
+      dropout: 0.1
+    binary_head:
+      enabled: false
+      hidden_dim: 128
+      dropout: 0.1
+    schema_aware_moe:
+      enabled: false
+      num_experts: 4
+      route_hidden_dim: 128
+      metadata_dim: 32
+      router_temperature: 1.0
+      delta_scale: 0.5
+      dropout: 0.1
+      schema_bucket_count: 2048
+      max_hops: 8
+      path_source_vocab_size: 8
   direct_pair_features:
     enabled: false
     hidden_dim: 128
+  learned_retrieval:
+    enabled: false
+    hidden_dim: 128
+    dropout: 0.1
+    bias_scale: 0.5
+    shortlist_top_k: 0
+    explanation_shortlist_top_k: 0
+    binary_shortlist_top_k: 0
+    selection_mode: retrieval
+    metadata_dim: 32
+    schema_bucket_count: 2048
+    max_hops: 8
+    path_source_vocab_size: 8
   interaction:
     enabled: true
     hidden_dim: 128
     dropout: 0.1
+    path_quality_summary:
+      enabled: false
+      feature_dim: 4
+      top_k: 4
+    uncertainty_fusion:
+      enabled: false
+      top_k: 4
+      hidden_dim: 128
+      dropout: 0.1
+      summary_dim: 8
   aggregator:
     type: topk_logsumexp
     top_k: 4
+    min_top_k: 1
     alpha: 0.5
     attention_temperature: 1.0
+    selector_temperature: 1.0
+    adaptive_mass_threshold: 0.8
+    adaptive_use_confidence: true
+    agreement_aware:
+      enabled: false
+      explanation_weight: 0.35
+      binary_weight: 0.25
+      agreement_weight: 0.5
+      confidence_weight: 0.15
+  dual_aggregation:
+    enabled: false
+    pair_mix_alpha: 0.2
+    pair_feedback_enabled: true
+    use_explanation_in_reliability: true
+    evidence_only_when_no_gold: false
+    no_gold_feedback_scale: 1.0
+    agreement_fusion_v2:
+      enabled: false
+      disagreement_penalty: 0.5
+      explanation_confidence_weight: 0.1
+      evidence_confidence_weight: 0.1
+      min_scale: 0.2
+    cross_view_attention:
+      enabled: false
+      num_heads: 4
+      hidden_dim: 128
+      dropout: 0.1
+      delta_scale: 0.25
+      score_delta_scale: 0.15
+      score_temperature: 1.0
+      use_score_gating: true
+      use_in_reliability: true
+    explanation_aggregator:
+      type: topk_logsumexp
+      top_k: 4
+      min_top_k: 1
+      attention_temperature: 1.0
+      selector_temperature: 1.0
+      adaptive_mass_threshold: 0.8
+      adaptive_use_confidence: true
+    hierarchical:
+      enabled: false
+      max_groups: 16
+      group_by:
+        - schema
+        - hop
+        - source
+      within_group_aggregator:
+        type: topk_logsumexp
+        top_k: 2
+        min_top_k: 1
+        attention_temperature: 1.0
+        selector_temperature: 1.0
+        adaptive_mass_threshold: 0.8
+        adaptive_use_confidence: true
+      between_group_aggregator:
+        type: topk_logsumexp
+        top_k: 4
+        min_top_k: 1
+        attention_temperature: 1.0
+        selector_temperature: 1.0
+        adaptive_mass_threshold: 0.8
+        adaptive_use_confidence: true
+    evidence_hierarchical:
+      enabled: false
+      max_groups: 16
+      group_by:
+        - schema
+        - hop
+        - source
+      within_group_aggregator:
+        type: topk_logsumexp
+        top_k: 2
+        min_top_k: 1
+        attention_temperature: 1.0
+        selector_temperature: 1.0
+        adaptive_mass_threshold: 0.8
+        adaptive_use_confidence: true
+      between_group_aggregator:
+        type: topk_logsumexp
+        top_k: 4
+        min_top_k: 1
+        attention_temperature: 1.0
+        selector_temperature: 1.0
+        adaptive_mass_threshold: 0.8
+        adaptive_use_confidence: true
+    explanation_hierarchical:
+      enabled: false
+      max_groups: 16
+      group_by:
+        - schema
+        - hop
+        - source
+      within_group_aggregator:
+        type: topk_logsumexp
+        top_k: 2
+        min_top_k: 1
+        attention_temperature: 1.0
+        selector_temperature: 1.0
+        adaptive_mass_threshold: 0.8
+        adaptive_use_confidence: true
+      between_group_aggregator:
+        type: topk_logsumexp
+        top_k: 4
+        min_top_k: 1
+        attention_temperature: 1.0
+        selector_temperature: 1.0
+        adaptive_mass_threshold: 0.8
+        adaptive_use_confidence: true
+    validity_aggregator:
+      enabled: false
+      pair_feedback_enabled: true
+      use_in_reliability: true
+      pair_mix_alpha: 0.08
+      type: topk_logsumexp
+      top_k: 4
+      min_top_k: 1
+      attention_temperature: 1.0
+      selector_temperature: 1.0
+      adaptive_mass_threshold: 0.8
+      adaptive_use_confidence: true
+    validity_graph_sidecar:
+      enabled: false
+      use_in_reliability: false
+      use_in_calibration: true
+      hidden_dim: 128
+      dropout: 0.1
+      summary_dim: 5
+      score_delta_scale: 0.18
+      similarity_temperature: 0.7
+      schema_boost: 0.2
+      hop_boost: 0.1
+      source_boost: 0.08
+    path_interaction:
+      enabled: false
+      explanation_only: false
+      num_layers: 1
+      num_heads: 4
+      ff_hidden_dim: 128
+      dropout: 0.1
+      score_delta_scale: 0.2
+    no_gold_evidence_expert:
+      enabled: false
+      delta_scale: 0.35
+      residual_mix_alpha: 0.5
+      size_threshold: 6
+      confidence_threshold: 0.6
+      learned_mix_gate: false
+      gate_hidden_dim: 128
+      hidden_dim: 128
+      dropout: 0.1
+      pair_feedback_enabled: true
+      aggregator:
+        type: topk_logsumexp
+        top_k: 4
+        attention_temperature: 1.0
+        selector_temperature: 1.0
+    residual_dual_evidence_expert:
+      enabled: false
+      route_prior_strength: 1.5
+      routing_hidden_dim: 128
+      dropout: 0.1
+      gold_expert:
+        delta_scale: 0.12
+        residual_mix_alpha: 0.18
+        size_threshold: 5
+        confidence_threshold: 0.55
+        learned_mix_gate: true
+        gate_hidden_dim: 128
+        hidden_dim: 128
+        dropout: 0.1
+        aggregator:
+          type: topk_logsumexp
+          top_k: 4
+          attention_temperature: 1.0
+          selector_temperature: 0.95
+      latent_expert:
+        delta_scale: 0.18
+        residual_mix_alpha: 0.28
+        size_threshold: 8
+        confidence_threshold: 0.65
+        learned_mix_gate: true
+        gate_hidden_dim: 128
+        hidden_dim: 128
+        dropout: 0.1
+        aggregator:
+          type: topk_logsumexp
+          top_k: 4
+          attention_temperature: 1.0
+          selector_temperature: 0.9
+  binary_calibration:
+    enabled: false
+    pair_feedback_enabled: true
+    hidden_dim: 64
+    dropout: 0.1
+    delta_scale: 0.4
+    summary_dim: 3
+    graph_feature_dim: 4
 
 training:
   batch_size: 32
@@ -167,18 +427,46 @@ training:
   stage2_epochs: 5
   stage3_epochs: 5
   stage4_epochs: 3
+  stage5_epochs: 0
   stage4_anchor_weight: 0.25
+  stage5_anchor_weight: 0.25
   stage4_pair_cls_weight: 1.0
+  stage5_pair_pu_weight: 0.2
   freeze_encoder_stage3: false
   freeze_encoder_stage4: false
+  freeze_encoder_stage5: true
   stage3_optimizer:
     lr: null
     weight_decay: null
+    path_scorer_lr_multiplier: 1.0
+    pair_model_lr_multiplier: 1.0
+    freeze_path_scorer: false
+    freeze_explanation_branch: false
+    explanation_branch_lr_multiplier: 1.0
     scheduler:
       enabled: false
       type: cosine
       warmup_epochs: 0
       min_lr_ratio: 0.1
+  stage3_explanation_schedule:
+    enabled: false
+    unfreeze_epoch: 0
+    post_unfreeze_lr_multiplier: 0.1
+  stage3_model_selection:
+    enabled: false
+    pair_metric: auprc
+    pair_weight: 1.0
+    path_metric_source: hard_path
+    path_weights:
+      mrr: 0.1
+      hits@1: 0.05
+      hits@5: 0.02
+  stage5_optimizer:
+    lr: null
+    weight_decay: null
+    path_scorer_lr_multiplier: 0.1
+    pair_model_lr_multiplier: 1.0
+    freeze_path_scorer: false
   loss_weights:
     path_rank: 1.0
     pair_cls: 1.0
@@ -192,8 +480,90 @@ training:
     corrupt_internal: 4
     cross_pair_same_schema: 2
     cross_pair_same_hop: 2
+  path_binary_aux:
+    enabled: false
+    weight: 0.1
+    use_separate_head: false
+    negative_sources:
+      - corrupt_internal
+      - cross_pair_same_schema
+  path_head_alignment_weight: 0.0
+  stage3_explanation_aux:
+    enabled: false
+    weight: 0.1
+    margin: null
+    reduction: topk_mean
+    top_k: 4
+  stage3_binary_calibration_aux:
+    enabled: false
+    weight: 0.05
+    margin: null
+    reduction: topk_mean
+    top_k: 4
+  stage3_binary_calibration_teacher:
+    enabled: false
+    weight: 0.05
+    top_k: 4
+    teacher_temperature: 1.0
+    student_temperature: 1.0
+    gold_boost: 0.5
+  stage3_explanation_distillation:
+    enabled: false
+    weight: 0.05
+    student_key: raw_path_scores
+    start_epoch: 1
+    ramp_epochs: 0
+    top_k: 4
+    use_topk_only: true
+    use_retrieved_only: false
+    use_relative_to_row_max: false
+    explanation_row_ratio: 0.9
+    binary_row_ratio: 0.9
+    agreement_row_ratio: 0.95
+    min_explanation_prob: 0.6
+    min_binary_prob: 0.55
+    min_agreement: 0.65
+    min_bag_reliability: 0.0
+    fallback_top1_when_empty: false
+    fallback_min_teacher_prob: 0.55
+    fallback_min_bag_reliability: 0.0
+    require_gold_paths: false
+  retrieval_explanation_alignment:
+    enabled: false
+    weight: 0.1
+    margin: null
+    reduction: topk_mean
+    top_k: 4
+  retrieval_teacher_guided:
+    enabled: false
+    weight: 0.05
+    student_key: reranked_path_scores
+    use_retrieved_only: true
+    top_k: 4
+    teacher_temperature: 1.0
+    student_temperature: 1.0
+    gold_boost: 0.5
+  initialization:
+    enabled: false
+    checkpoint_path: null
+    explanation_checkpoint_path: null
+    copy_encoder: false
+    copy_path_encoder: true
+    copy_evidence_head: true
+    copy_binary_head: true
+    initialize_explanation_head_from: evidence_head
+    copy_direct_pair: false
+    copy_interactor: false
+    copy_aggregator: false
+    copy_explanation_aggregator: false
+    initialize_explanation_aggregator_from: aggregator
+    explanation_checkpoint_source: explanation_head
+  checkpointing:
+    save_best_model: false
+    best_model_filename: best_model.pt
   stage3_bag_policy: retrieve_all
   stage4_max_pairs: null
+  stage5_max_pairs: null
 
 pseudo:
   enabled: true
@@ -203,6 +573,22 @@ pseudo:
   min_stability: 0.55
   min_confidence: 0.2
   require_schema_whitelist: true
+  weight_scale: 1.0
+
+pair_pu:
+  enabled: false
+  reliable_negative_sources:
+    - contraindication
+    - off-label use
+  pair_score_threshold: 0.7
+  top1_path_threshold: 0.55
+  top12_margin_threshold: 0.03
+  top1_binary_threshold: 0.55
+  min_reliability: 0.55
+  max_uncertainty: 0.5
+  min_confidence: 0.2
+  min_bag_size: 2
+  min_agreement: 0.55
   weight_scale: 1.0
 
 evaluation:

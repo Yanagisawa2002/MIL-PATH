@@ -1,0 +1,21 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_distill_shortlist_agreement_tuned.yaml
+
+training:
+  stage3_explanation_distillation:
+    enabled: true
+    weight: 0.03
+    start_epoch: 4
+    ramp_epochs: 6
+    top_k: 6
+    use_topk_only: true
+    use_relative_to_row_max: true
+    explanation_row_ratio: 0.92
+    binary_row_ratio: 0.95
+    agreement_row_ratio: 0.95
+    min_explanation_prob: 0.50
+    min_binary_prob: 0.48
+    min_agreement: 0.50
+    fallback_top1_when_empty: true
+    fallback_min_teacher_prob: 0.53
+    fallback_min_bag_reliability: 0.40
+    require_gold_paths: false

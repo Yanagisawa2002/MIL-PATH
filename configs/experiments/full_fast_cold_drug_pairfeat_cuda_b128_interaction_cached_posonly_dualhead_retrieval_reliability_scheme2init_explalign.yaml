@@ -1,0 +1,26 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_reliability.yaml
+
+training:
+  initialization:
+    enabled: true
+    checkpoint_path: outputs/full_fast_cold_drug_pairfeat_cuda_b128_interaction/quick_contrast_gold_mech_interaction_cached_posonly_auxbin_head_s3calm_stage30_ckpt/best_model.pt
+    copy_encoder: false
+    copy_path_encoder: true
+    copy_evidence_head: true
+    copy_binary_head: true
+    initialize_explanation_head_from: evidence_head
+    copy_direct_pair: false
+    copy_interactor: false
+  stage3_explanation_aux:
+    enabled: true
+    weight: 0.1
+    reduction: topk_mean
+    top_k: 4
+  retrieval_explanation_alignment:
+    enabled: true
+    weight: 0.1
+    reduction: topk_mean
+    top_k: 4
+  checkpointing:
+    save_best_model: true
+    best_model_filename: best_model.pt

@@ -1,0 +1,10 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly.yaml
+
+training:
+  path_binary_aux:
+    enabled: true
+    weight: 0.1
+    use_separate_head: false
+    negative_sources:
+      - corrupt_internal
+      - cross_pair_same_schema

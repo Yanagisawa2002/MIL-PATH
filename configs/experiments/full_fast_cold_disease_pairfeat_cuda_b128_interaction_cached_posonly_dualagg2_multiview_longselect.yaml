@@ -1,0 +1,23 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualagg2_multiview.yaml
+
+training:
+  stage3_epochs: 12
+  stage3_optimizer:
+    scheduler:
+      enabled: true
+      type: cosine
+      warmup_epochs: 1
+      min_lr_ratio: 0.2
+  stage3_explanation_schedule:
+    enabled: true
+    unfreeze_epoch: 6
+    post_unfreeze_lr_multiplier: 0.05
+  stage3_model_selection:
+    enabled: true
+    pair_metric: auprc
+    pair_weight: 1.0
+    path_metric_source: hard_path
+    path_weights:
+      mrr: 0.1
+      hits@1: 0.05
+      hits@5: 0.02

@@ -1,0 +1,15 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  dual_aggregation:
+    no_gold_evidence_expert:
+      enabled: true
+      delta_scale: 0.25
+      hidden_dim: 128
+      dropout: 0.1
+      pair_feedback_enabled: true
+      aggregator:
+        type: topk_logsumexp
+        top_k: 4
+        attention_temperature: 1.0
+        selector_temperature: 0.9

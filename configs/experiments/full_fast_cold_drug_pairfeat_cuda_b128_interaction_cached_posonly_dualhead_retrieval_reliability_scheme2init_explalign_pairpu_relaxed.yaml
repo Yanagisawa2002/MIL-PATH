@@ -1,0 +1,21 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_pairpu.yaml
+
+training:
+  initialization:
+    enabled: true
+    checkpoint_path: outputs/full_fast_cold_drug_pairfeat_cuda_b128_interaction/quick_contrast_gold_mech_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_pairpu_stage35/best_model.pt
+    copy_encoder: true
+    copy_full_path_scorer: true
+    copy_full_pair_model: true
+
+pair_pu:
+  enabled: true
+  pair_score_threshold: 0.6
+  top1_path_threshold: 0.7
+  top12_margin_threshold: 0.03
+  top1_binary_threshold: 0.48
+  min_reliability: 0.8
+  max_uncertainty: 0.25
+  min_confidence: 0.15
+  min_bag_size: 1
+  min_agreement: 0.7

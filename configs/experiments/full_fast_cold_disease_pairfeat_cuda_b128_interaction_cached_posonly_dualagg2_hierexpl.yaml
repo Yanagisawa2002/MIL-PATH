@@ -1,0 +1,21 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  dual_aggregation:
+    explanation_hierarchical:
+      enabled: true
+      max_groups: 12
+      group_by:
+        - schema
+        - hop
+        - source
+      within_group_aggregator:
+        type: topk_logsumexp
+        top_k: 2
+        attention_temperature: 1.0
+        selector_temperature: 0.9
+      between_group_aggregator:
+        type: topk_logsumexp
+        top_k: 5
+        attention_temperature: 1.0
+        selector_temperature: 0.9

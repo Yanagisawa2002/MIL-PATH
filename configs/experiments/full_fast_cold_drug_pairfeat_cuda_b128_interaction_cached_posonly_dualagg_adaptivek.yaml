@@ -1,0 +1,20 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  aggregator:
+    type: adaptive_topk_logsumexp
+    top_k: 6
+    min_top_k: 2
+    attention_temperature: 1.0
+    selector_temperature: 0.95
+    adaptive_mass_threshold: 0.78
+    adaptive_use_confidence: true
+  dual_aggregation:
+    explanation_aggregator:
+      type: adaptive_topk_logsumexp
+      top_k: 8
+      min_top_k: 2
+      attention_temperature: 1.0
+      selector_temperature: 0.9
+      adaptive_mass_threshold: 0.84
+      adaptive_use_confidence: true

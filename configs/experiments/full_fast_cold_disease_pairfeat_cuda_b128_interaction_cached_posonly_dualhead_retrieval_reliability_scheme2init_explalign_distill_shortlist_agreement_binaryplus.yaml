@@ -1,0 +1,24 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_distill_shortlist_agreement_binaryrebalance.yaml
+
+model:
+  learned_retrieval:
+    shortlist_top_k: 15
+  aggregator:
+    selector_temperature: 0.95
+    agreement_aware:
+      enabled: true
+      explanation_weight: 0.38
+      binary_weight: 0.33
+      agreement_weight: 0.22
+      confidence_weight: 0.15
+
+training:
+  stage3_explanation_distillation:
+    enabled: true
+    weight: 0.022
+    top_k: 5
+    use_topk_only: true
+    min_explanation_prob: 0.56
+    min_binary_prob: 0.52
+    min_agreement: 0.58
+    require_gold_paths: false

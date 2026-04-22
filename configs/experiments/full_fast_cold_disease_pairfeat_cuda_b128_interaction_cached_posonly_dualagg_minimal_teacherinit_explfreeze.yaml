@@ -1,0 +1,5 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit.yaml
+
+training:
+  stage3_optimizer:
+    freeze_explanation_branch: true

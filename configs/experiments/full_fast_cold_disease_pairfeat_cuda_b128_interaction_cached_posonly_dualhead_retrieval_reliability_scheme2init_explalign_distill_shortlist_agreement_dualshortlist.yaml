@@ -1,0 +1,7 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_distill_shortlist_agreement_binaryrebalance.yaml
+
+model:
+  learned_retrieval:
+    shortlist_top_k: 10
+    explanation_shortlist_top_k: 4
+    binary_shortlist_top_k: 2

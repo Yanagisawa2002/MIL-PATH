@@ -1,0 +1,7 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  path_scorer:
+    multi_view_encoder:
+      enabled: true
+      hidden_dim: 128

@@ -1,0 +1,5 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_auxbin_head.yaml
+
+training:
+  stage3_optimizer:
+    path_scorer_lr_multiplier: 0.1

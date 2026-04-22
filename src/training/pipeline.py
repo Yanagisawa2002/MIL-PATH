@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -18,6 +19,7 @@ from src.data.datasets import (
     LazyCandidatePathStore,
     PairBagDataset,
     PathRankingDataset,
+    PseudoPositivePairDataset,
     PseudoRationaleDataset,
     load_artifact_bundle,
 )
@@ -61,6 +63,21 @@ def build_candidate_store(
         cache_dir=Path(config["paths"]["cache_dir"]) / "candidate_paths_cache",
         cache_namespace=cache_namespace,
     )
+
+
+def _load_pair_source_map(split_dir: str | Path, split: str) -> dict[str, str]:
+    csv_path = Path(split_dir) / f"pairs_{split}.csv"
+    if not csv_path.exists():
+        return {}
+    mapping: dict[str, str] = {}
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            pair_id = row.get("pair_id")
+            if not pair_id:
+                continue
+            mapping[pair_id] = row.get("pair_source", "")
+    return mapping
 
 
 def build_stage_dataloaders(config: dict[str, Any], split: str = "train") -> dict[str, Any]:
@@ -111,6 +128,14 @@ def build_stage_dataloaders(config: dict[str, Any], split: str = "train") -> dic
         candidate_store=stage4_candidate_store,
         max_pairs=config["training"].get("stage4_max_pairs"),
     )
+    pair_source_map = _load_pair_source_map(config["paths"]["split_dir"], split=split)
+    stage5_dataset = PseudoPositivePairDataset(
+        pair_table=bundle.pair_tables[split],
+        candidate_store=stage4_candidate_store,
+        pair_source_by_id=pair_source_map,
+        reliable_negative_sources=set(config.get("pair_pu", {}).get("reliable_negative_sources", [])),
+        max_pairs=config["training"].get("stage5_max_pairs"),
+    )
 
     batch_size = config["training"]["batch_size"]
     num_workers = config["training"]["num_workers"]
@@ -145,6 +170,13 @@ def build_stage_dataloaders(config: dict[str, Any], split: str = "train") -> dic
         ),
         "stage4": DataLoader(
             stage4_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=PairBagCollator(max_paths=stage4_retriever_config["max_candidates"]),
+        ),
+        "stage5": DataLoader(
+            stage5_dataset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,

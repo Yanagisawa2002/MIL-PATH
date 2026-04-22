@@ -15,6 +15,14 @@ class PseudoSelectionResult:
     summary: dict[str, Any]
 
 
+@dataclass(slots=True)
+class PseudoPairSelectionResult:
+    accepted_mask: torch.Tensor
+    confidence: torch.Tensor
+    agreement: torch.Tensor
+    summary: dict[str, Any]
+
+
 class PseudoRationaleSelector:
     """Select pseudo rationales for positive-no-path pairs."""
 
@@ -89,5 +97,79 @@ class PseudoRationaleSelector:
                 "mean_confidence": float(confidence.mean().item()),
                 "num_nonempty_bags": int((valid_counts > 0).sum().item()),
                 "num_singleton_bags": int((valid_counts == 1).sum().item()),
+            },
+        )
+
+
+class PseudoPositivePairSelector:
+    """Select mechanism-consistent pseudo-positive pairs from unlabeled pools."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+
+    def select(
+        self,
+        pair_logits: torch.Tensor,
+        path_logits: torch.Tensor,
+        *,
+        binary_logits: torch.Tensor | None = None,
+        reliability: torch.Tensor | None = None,
+        uncertainty: torch.Tensor | None = None,
+        bag_mask: torch.Tensor | None = None,
+    ) -> PseudoPairSelectionResult:
+        pair_prob = torch.sigmoid(pair_logits)
+        if bag_mask is None:
+            bag_mask = torch.ones_like(path_logits, dtype=torch.bool)
+        else:
+            bag_mask = bag_mask.to(dtype=torch.bool, device=path_logits.device)
+        valid_counts = bag_mask.sum(dim=1)
+        masked_path_logits = path_logits.masked_fill(~bag_mask, float("-inf"))
+        path_prob = torch.sigmoid(masked_path_logits)
+        top1_prob, top1_idx = path_prob.max(dim=1)
+        top2_values = path_prob.topk(k=min(2, path_prob.size(1)), dim=1).values
+        top2_prob = top2_values[:, -1]
+        margin = torch.where(valid_counts <= 1, torch.ones_like(top1_prob), top1_prob - top2_prob)
+
+        if binary_logits is None:
+            binary_prob = path_prob
+            top1_binary_prob = top1_prob
+            agreement = torch.ones_like(top1_prob)
+        else:
+            masked_binary_logits = binary_logits.masked_fill(~bag_mask, float("-inf"))
+            binary_prob = torch.sigmoid(masked_binary_logits)
+            top1_binary_prob = binary_prob.gather(1, top1_idx.unsqueeze(1)).squeeze(1)
+            agreement = 1.0 - (top1_prob - top1_binary_prob).abs().clamp(min=0.0, max=1.0)
+
+        if reliability is None:
+            reliability = torch.where(valid_counts > 0, torch.ones_like(pair_prob), torch.zeros_like(pair_prob))
+        if uncertainty is None:
+            uncertainty = 1.0 - reliability
+
+        accepted = (
+            (pair_prob >= self.config["pair_score_threshold"])
+            & (top1_prob >= self.config["top1_path_threshold"])
+            & (margin >= self.config["top12_margin_threshold"])
+            & (top1_binary_prob >= self.config["top1_binary_threshold"])
+            & (reliability >= self.config["min_reliability"])
+            & (uncertainty <= self.config["max_uncertainty"])
+            & (agreement >= self.config["min_agreement"])
+            & (valid_counts >= int(self.config.get("min_bag_size", 1)))
+        )
+
+        confidence = (pair_prob * top1_prob * top1_binary_prob * reliability * agreement).clamp(min=0.0, max=1.0)
+        accepted = accepted & (confidence >= self.config["min_confidence"])
+        confidence = confidence * float(self.config.get("weight_scale", 1.0))
+        return PseudoPairSelectionResult(
+            accepted_mask=accepted,
+            confidence=confidence,
+            agreement=agreement,
+            summary={
+                "num_pairs": int(pair_logits.numel()),
+                "num_accepted": int(accepted.sum().item()),
+                "accept_rate": float(accepted.float().mean().item()),
+                "mean_confidence": float(confidence.mean().item()),
+                "mean_agreement": float(agreement.mean().item()),
+                "num_nonempty_bags": int((valid_counts > 0).sum().item()),
+                "num_minbag_eligible": int((valid_counts >= int(self.config.get("min_bag_size", 1))).sum().item()),
             },
         )

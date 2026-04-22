@@ -1,0 +1,21 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualagg.yaml
+
+model:
+  path_scorer:
+    subpath_explanation:
+      enabled: true
+      hidden_dim: 128
+      temperature: 0.95
+  binary_calibration:
+    enabled: true
+    hidden_dim: 64
+    dropout: 0.1
+    delta_scale: 0.4
+    summary_dim: 3
+
+training:
+  stage3_binary_calibration_aux:
+    enabled: true
+    weight: 0.08
+    reduction: topk_mean
+    top_k: 4

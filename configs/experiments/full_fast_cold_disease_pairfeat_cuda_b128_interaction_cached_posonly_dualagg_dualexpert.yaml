@@ -1,0 +1,37 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  dual_aggregation:
+    residual_dual_evidence_expert:
+      enabled: true
+      route_prior_strength: 1.7
+      routing_hidden_dim: 128
+      dropout: 0.1
+      gold_expert:
+        delta_scale: 0.1
+        residual_mix_alpha: 0.16
+        size_threshold: 5
+        confidence_threshold: 0.55
+        learned_mix_gate: true
+        gate_hidden_dim: 128
+        hidden_dim: 128
+        dropout: 0.1
+        aggregator:
+          type: topk_logsumexp
+          top_k: 4
+          attention_temperature: 1.0
+          selector_temperature: 0.95
+      latent_expert:
+        delta_scale: 0.18
+        residual_mix_alpha: 0.28
+        size_threshold: 8
+        confidence_threshold: 0.65
+        learned_mix_gate: true
+        gate_hidden_dim: 128
+        hidden_dim: 128
+        dropout: 0.1
+        aggregator:
+          type: topk_logsumexp
+          top_k: 4
+          attention_temperature: 1.0
+          selector_temperature: 0.9

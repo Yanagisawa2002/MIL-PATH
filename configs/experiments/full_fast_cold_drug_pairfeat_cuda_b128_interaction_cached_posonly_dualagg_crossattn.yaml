@@ -1,0 +1,14 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  dual_aggregation:
+    cross_view_attention:
+      enabled: true
+      num_heads: 4
+      hidden_dim: 128
+      dropout: 0.1
+      delta_scale: 0.2
+      score_delta_scale: 0.1
+      score_temperature: 1.0
+      use_score_gating: true
+      use_in_reliability: true

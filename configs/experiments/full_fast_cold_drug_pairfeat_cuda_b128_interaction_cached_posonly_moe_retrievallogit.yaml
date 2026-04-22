@@ -1,0 +1,26 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_distill_shortlist_agreement_tuned.yaml
+
+model:
+  path_scorer:
+    schema_aware_moe:
+      enabled: true
+      num_experts: 4
+      route_hidden_dim: 128
+      metadata_dim: 32
+      router_temperature: 0.9
+      delta_scale: 0.4
+      dropout: 0.1
+  learned_retrieval:
+    selection_mode: retrieval
+    metadata_dim: 32
+
+training:
+  retrieval_teacher_guided:
+    enabled: true
+    student_key: retrieval_logits
+    weight: 0.08
+    use_retrieved_only: true
+    top_k: 6
+    teacher_temperature: 1.0
+    student_temperature: 0.9
+    gold_boost: 0.6

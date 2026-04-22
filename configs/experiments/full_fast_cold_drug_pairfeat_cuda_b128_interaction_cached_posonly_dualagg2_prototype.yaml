@@ -1,0 +1,13 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  path_scorer:
+    prototype_aware_explanation:
+      enabled: true
+      num_prototypes: 16
+      hidden_dim: 128
+      metadata_dim: 32
+      temperature: 0.9
+      schema_bucket_count: 2048
+      max_hops: 8
+      path_source_vocab_size: 8

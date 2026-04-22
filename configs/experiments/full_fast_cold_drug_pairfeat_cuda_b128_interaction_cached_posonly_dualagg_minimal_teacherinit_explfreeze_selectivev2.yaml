@@ -1,0 +1,35 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  dual_aggregation:
+    evidence_only_when_no_gold: true
+    no_gold_feedback_scale: 0.0
+    agreement_fusion_v2:
+      enabled: true
+      disagreement_penalty: 0.5
+      explanation_confidence_weight: 0.05
+      evidence_confidence_weight: 0.2
+      min_scale: 0.25
+
+training:
+  stage3_explanation_distillation:
+    enabled: true
+    weight: 0.025
+    student_key: reranked_path_scores
+    start_epoch: 1
+    ramp_epochs: 2
+    top_k: 3
+    use_topk_only: true
+    use_retrieved_only: true
+    min_explanation_prob: 0.74
+    min_binary_prob: 0.52
+    min_agreement: 0.76
+    min_bag_reliability: 0.55
+    use_relative_to_row_max: true
+    explanation_row_ratio: 0.94
+    binary_row_ratio: 0.9
+    agreement_row_ratio: 0.96
+    fallback_top1_when_empty: true
+    fallback_min_teacher_prob: 0.64
+    fallback_min_bag_reliability: 0.55
+    require_gold_paths: false

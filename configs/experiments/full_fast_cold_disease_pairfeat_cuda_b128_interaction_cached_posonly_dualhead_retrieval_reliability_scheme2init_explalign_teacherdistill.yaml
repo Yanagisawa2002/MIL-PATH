@@ -1,0 +1,29 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_distill_shortlist_agreement_binaryrebalance.yaml
+
+training:
+  stage3_explanation_distillation:
+    enabled: true
+    weight: 0.015
+    start_epoch: 4
+    ramp_epochs: 6
+    top_k: 4
+    use_topk_only: true
+    use_relative_to_row_max: true
+    explanation_row_ratio: 0.93
+    binary_row_ratio: 0.95
+    agreement_row_ratio: 0.95
+    min_explanation_prob: 0.54
+    min_binary_prob: 0.50
+    min_agreement: 0.55
+    fallback_top1_when_empty: true
+    fallback_min_teacher_prob: 0.55
+    fallback_min_bag_reliability: 0.45
+    require_gold_paths: false
+  retrieval_teacher_guided:
+    enabled: true
+    weight: 0.06
+    use_retrieved_only: true
+    top_k: 4
+    teacher_temperature: 1.0
+    student_temperature: 1.0
+    gold_boost: 0.5

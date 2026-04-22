@@ -1,0 +1,40 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_distill_shortlist_agreement_binaryrebalance.yaml
+
+model:
+  dual_aggregation:
+    enabled: true
+    pair_feedback_enabled: true
+    use_explanation_in_reliability: false
+    pair_mix_alpha: 0.08
+    explanation_aggregator:
+      type: topk_logsumexp
+      top_k: 5
+      attention_temperature: 1.0
+      selector_temperature: 0.95
+  binary_calibration:
+    enabled: false
+
+training:
+  initialization:
+    enabled: true
+    checkpoint_path: outputs/full_fast_cold_disease/quick_contrast_gold_mech_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_distill_shortlist_agreement_binaryrebalance_stage30/best_model.pt
+    explanation_checkpoint_path: outputs/full_fast_cold_disease/quick_contrast_gold_mech_interaction_cached_posonly_dualhead_retrieval_reliability_scheme2init_explalign_teacherdistill_stage30/best_model.pt
+    copy_encoder: false
+    copy_path_encoder: true
+    copy_evidence_head: true
+    copy_binary_head: true
+    explanation_checkpoint_source: explanation_head
+    copy_direct_pair: true
+    copy_interactor: true
+    copy_retrieval_reranker: true
+    copy_reliability_estimator: true
+    copy_aggregator: true
+    copy_explanation_aggregator: true
+    initialize_explanation_aggregator_from: aggregator
+  stage3_explanation_distillation:
+    enabled: false
+  stage3_binary_calibration_aux:
+    enabled: false
+  stage3_binary_calibration_teacher:
+    enabled: false
+

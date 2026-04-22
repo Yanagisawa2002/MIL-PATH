@@ -1,0 +1,43 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_auxbin_head_s3calm_ckpt.yaml
+
+model:
+  path_scorer:
+    decoupled_heads:
+      enabled: true
+      hidden_dim: 128
+      dropout: 0.1
+  learned_retrieval:
+    enabled: true
+    hidden_dim: 128
+    dropout: 0.1
+    bias_scale: 0.5
+  interaction:
+    uncertainty_fusion:
+      enabled: true
+      top_k: 4
+      hidden_dim: 128
+      dropout: 0.1
+      summary_dim: 8
+
+training:
+  initialization:
+    enabled: true
+    checkpoint_path: outputs/full_fast_cold_disease/quick_contrast_gold_mech_interaction_cached_posonly_auxbin_head_s3calm_stage30_ckpt/best_model.pt
+    copy_encoder: false
+    copy_path_encoder: true
+    copy_evidence_head: true
+    copy_binary_head: true
+    initialize_explanation_head_from: evidence_head
+    copy_direct_pair: false
+    copy_interactor: false
+  path_head_alignment_weight: 0.05
+  stage3_explanation_aux:
+    enabled: true
+    weight: 0.1
+    reduction: topk_mean
+    top_k: 4
+  retrieval_explanation_alignment:
+    enabled: true
+    weight: 0.1
+    reduction: topk_mean
+    top_k: 4

@@ -1,0 +1,10 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_dualhead_retrieval_only.yaml
+
+model:
+  interaction:
+    uncertainty_fusion:
+      enabled: true
+      top_k: 4
+      hidden_dim: 128
+      dropout: 0.1
+      summary_dim: 8

@@ -1,0 +1,13 @@
+inherit_from: configs/experiments/full_fast_cold_disease_pairfeat_cuda_b128_interaction_cached_posonly_dualagg_minimal_teacherinit_explfreeze.yaml
+
+model:
+  dual_aggregation:
+    validity_aggregator:
+      enabled: true
+      pair_feedback_enabled: false
+      use_in_reliability: true
+      pair_mix_alpha: 0.04
+      type: topk_logsumexp
+      top_k: 4
+      attention_temperature: 1.0
+      selector_temperature: 0.9

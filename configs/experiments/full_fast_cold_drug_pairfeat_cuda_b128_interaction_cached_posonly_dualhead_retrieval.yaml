@@ -1,0 +1,21 @@
+inherit_from: configs/experiments/full_fast_cold_drug_pairfeat_cuda_b128_interaction_cached_posonly_auxbin_head_s3calm.yaml
+
+model:
+  path_scorer:
+    decoupled_heads:
+      enabled: true
+      hidden_dim: 128
+      dropout: 0.1
+  learned_retrieval:
+    enabled: true
+    hidden_dim: 128
+    dropout: 0.1
+    bias_scale: 0.5
+  interaction:
+    path_quality_summary:
+      enabled: true
+      feature_dim: 4
+      top_k: 4
+
+training:
+  path_head_alignment_weight: 0.05
